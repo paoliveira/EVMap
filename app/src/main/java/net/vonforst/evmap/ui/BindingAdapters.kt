@@ -64,7 +64,14 @@ fun invisibleUnless(view: View, visible: Boolean) {
 
 @BindingAdapter("invisibleUnlessAnimated")
 fun invisibleUnlessAnimated(view: View, oldValue: Boolean, newValue: Boolean) {
-    if (oldValue == newValue) return
+    if (oldValue == newValue) {
+        if (!newValue && view.visibility == View.VISIBLE && view.alpha == 1f) {
+            // view is initially invisible
+            view.visibility = View.GONE
+        } else {
+            return
+        }
+    }
 
     view.animate().cancel()
     if (newValue) {
@@ -382,9 +389,10 @@ private fun colorToTransparent(color: Int, targetAlpha: Float = 31f / 255): Int 
     val green = Color.green(color)
     val blue = Color.blue(color)
 
-    val newRed = ((red - (1 - targetAlpha) * 255) / targetAlpha).roundToInt()
-    val newGreen = ((green - (1 - targetAlpha) * 255) / targetAlpha).roundToInt()
-    val newBlue = ((blue - (1 - targetAlpha) * 255) / targetAlpha).roundToInt()
+    val newRed = kotlin.math.max(((red - (1 - targetAlpha) * 255) / targetAlpha).roundToInt(), 0)
+    val newGreen =
+        kotlin.math.max(((green - (1 - targetAlpha) * 255) / targetAlpha).roundToInt(), 0)
+    val newBlue = kotlin.math.max(((blue - (1 - targetAlpha) * 255) / targetAlpha).roundToInt(), 0)
 
     return Color.argb((targetAlpha * 255).roundToInt(), newRed, newGreen, newBlue)
 }

@@ -4,54 +4,54 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/nav_graph">
 
-    <fragment
+    <navigation
         android:id="@+id/map"
-        android:name="net.vonforst.evmap.fragment.MapFragment"
-        android:label="MapFragment"
-        tools:layout="@layout/fragment_map">
-        <action
-            android:id="@+id/action_map_to_filterFragment"
-            app:destination="@id/filter"
-            app:exitAnim="@animator/nav_default_exit_anim"
-            app:enterAnim="@animator/nav_default_enter_anim"
-            app:popEnterAnim="@animator/nav_default_pop_enter_anim"
-            app:popExitAnim="@animator/nav_default_pop_exit_anim" />
-        <action
-            android:id="@+id/action_map_to_filterProfilesFragment"
-            app:destination="@id/filter_profiles"
-            app:exitAnim="@animator/nav_default_exit_anim"
-            app:enterAnim="@animator/nav_default_enter_anim"
-            app:popEnterAnim="@animator/nav_default_pop_enter_anim"
-            app:popExitAnim="@animator/nav_default_pop_exit_anim" />
-        <action
-            android:id="@+id/action_map_to_chargepriceFragment"
-            app:destination="@id/chargeprice"
-            app:exitAnim="@animator/nav_default_exit_anim"
-            app:enterAnim="@animator/nav_default_enter_anim"
-            app:popEnterAnim="@animator/nav_default_pop_enter_anim"
-            app:popExitAnim="@animator/nav_default_pop_exit_anim" />
-        <action
-            android:id="@+id/action_map_to_opensource_donations"
-            app:destination="@id/opensource_donations" />
-        <argument
-            android:name="locationName"
-            android:defaultValue="@null"
-            app:argType="string"
-            app:nullable="true" />
-        <argument
-            android:name="chargerId"
-            android:defaultValue="0L"
-            app:argType="long" />
-        <argument
-            android:name="latLng"
-            android:defaultValue="@null"
-            app:argType="com.car2go.maps.model.LatLng"
-            app:nullable="true" />
-        <argument
-            android:name="appStart"
-            android:defaultValue="false"
-            app:argType="boolean" />
-    </fragment>
+        app:startDestination="@id/map_frag">
+        <fragment
+            android:id="@+id/map_frag"
+            android:name="net.vonforst.evmap.fragment.MapFragment"
+            android:label=""
+            tools:layout="@layout/fragment_map">
+            <action
+                android:id="@+id/action_map_to_filterFragment"
+                app:destination="@id/filter"
+                app:exitAnim="@animator/nav_default_exit_anim"
+                app:enterAnim="@animator/nav_default_enter_anim"
+                app:popEnterAnim="@animator/nav_default_pop_enter_anim"
+                app:popExitAnim="@animator/nav_default_pop_exit_anim" />
+            <action
+                android:id="@+id/action_map_to_filterProfilesFragment"
+                app:destination="@id/filter_profiles"
+                app:exitAnim="@animator/nav_default_exit_anim"
+                app:enterAnim="@animator/nav_default_enter_anim"
+                app:popEnterAnim="@animator/nav_default_pop_enter_anim"
+                app:popExitAnim="@animator/nav_default_pop_exit_anim" />
+            <action
+                android:id="@+id/action_map_to_chargepriceFragment"
+                app:destination="@id/chargeprice" />
+            <action
+                android:id="@+id/action_map_to_opensource_donations"
+                app:destination="@id/opensource_donations" />
+            <argument
+                android:name="locationName"
+                android:defaultValue="@null"
+                app:argType="string"
+                app:nullable="true" />
+            <argument
+                android:name="chargerId"
+                android:defaultValue="0L"
+                app:argType="long" />
+            <argument
+                android:name="latLng"
+                android:defaultValue="@null"
+                app:argType="com.car2go.maps.model.LatLng"
+                app:nullable="true" />
+            <argument
+                android:name="appStart"
+                android:defaultValue="false"
+                app:argType="boolean" />
+        </fragment>
+    </navigation>
     <fragment
         android:id="@+id/about"
         android:name="net.vonforst.evmap.fragment.preference.AboutFragment"
@@ -85,14 +85,23 @@
         android:label="@string/settings_chargeprice"
         tools:layout="@layout/fragment_preference" />
     <fragment
+        android:id="@+id/settings_android_auto"
+        android:name="net.vonforst.evmap.fragment.preference.AndroidAutoSettingsFragment"
+        android:label="@string/settings_android_auto"
+        tools:layout="@layout/fragment_preference" />
+    <navigation
         android:id="@+id/favs"
-        android:name="net.vonforst.evmap.fragment.FavoritesFragment"
-        android:label="@string/menu_favs"
-        tools:layout="@layout/fragment_favorites">
-        <action
-            android:id="@+id/action_favs_to_map"
-            app:destination="@id/map" />
-    </fragment>
+        app:startDestination="@id/favs_frag">
+        <fragment
+            android:id="@+id/favs_frag"
+            android:name="net.vonforst.evmap.fragment.FavoritesFragment"
+            android:label="@string/menu_favs"
+            tools:layout="@layout/fragment_favorites">
+            <action
+                android:id="@+id/action_favs_to_map"
+                app:destination="@id/map" />
+        </fragment>
+    </navigation>
     <fragment
         android:id="@+id/filter"
         android:name="net.vonforst.evmap.fragment.FilterFragment"
@@ -103,25 +112,25 @@
         android:name="net.vonforst.evmap.fragment.FilterProfilesFragment"
         android:label="@string/menu_manage_filter_profiles"
         tools:layout="@layout/fragment_filter_profiles" />
-    <dialog
+    <fragment
         android:id="@+id/chargeprice"
         android:name="net.vonforst.evmap.fragment.ChargepriceFragment"
         android:label="@string/chargeprice_title"
         tools:layout="@layout/fragment_chargeprice">
         <action
-            android:id="@+id/action_chargeprice_to_settingsFragment"
-            app:destination="@id/settings"
+            android:id="@+id/action_chargeprice_to_chargepriceSettingsFragment"
+            app:destination="@id/settings_chargeprice"
             app:exitAnim="@animator/nav_default_exit_anim"
             app:enterAnim="@animator/nav_default_enter_anim"
             app:popEnterAnim="@animator/nav_default_enter_anim"
             app:popExitAnim="@animator/nav_default_exit_anim" />
+        <action
+            android:id="@+id/action_chargeprice_to_donateFragment"
+            app:destination="@id/donate" />
         <argument
             android:name="charger"
             app:argType="net.vonforst.evmap.model.ChargeLocation" />
-        <argument
-            android:name="dataSource"
-            app:argType="string" />
-    </dialog>
+    </fragment>
     <fragment
         android:id="@+id/donate"
         android:name="net.vonforst.evmap.fragment.DonateFragment"
@@ -129,7 +138,7 @@
         tools:layout="@layout/fragment_donate" />
     <dialog
         android:id="@+id/opensource_donations"
-        android:name="net.vonforst.evmap.fragment.updatedialogs.OpensourceDonationsDialogFramgent"
+        android:name="net.vonforst.evmap.fragment.updatedialogs.OpensourceDonationsDialogFragment"
         android:label="@string/donation_dialog_title"
         tools:layout="@layout/dialog_opensource_donations">
         <action
@@ -151,6 +160,8 @@
         android:label="OnboardingFragment">
         <action
             android:id="@+id/action_onboarding_to_map"
-            app:destination="@id/map" />
+            app:destination="@id/map"
+            app:popUpTo="@id/onboarding"
+            app:popUpToInclusive="true" />
     </fragment>
 </navigation>

@@ -105,9 +105,11 @@ class OpenChargeMapApiWrapper(
     baseurl: String = "https://api.openchargemap.io/v3/",
     context: Context? = null
 ) : ChargepointApi<OCMReferenceData> {
+    private val clusterThreshold = 11
     val api = OpenChargeMapApi.create(apikey, baseurl, context)
 
-    override fun getName() = "OpenChargeMap.org"
+    override val name = "OpenChargeMap.org"
+    override val id = "open_charge_map"
 
     private fun formatMultipleChoice(value: MultipleChoiceFilterValue?) =
         if (value == null || value.all) null else value.values.joinToString(",")
@@ -131,7 +133,7 @@ class OpenChargeMapApiWrapper(
         }
         val connectors = formatMultipleChoice(connectorsVal)
 
-        val operatorsVal = filters?.getMultipleChoiceValue("operators")!!
+        val operatorsVal = filters?.getMultipleChoiceValue("operators")
         if (operatorsVal != null && operatorsVal.values.isEmpty() && !operatorsVal.all) {
             // no operators chosen
             return Resource.success(emptyList())
@@ -235,10 +237,10 @@ class OpenChargeMapApiWrapper(
                 .filter { it.power == null || it.power >= (minPower ?: 0.0) }
                 .filter { if (connectorsVal != null && !connectorsVal.all) it.connectionTypeId in connectorsVal.values.map { it.toLong() } else true }
                 .sumOf { it.quantity ?: 1 } >= (minConnectors ?: 0)
-        }.map { it.convert(referenceData) }.distinct() as List<ChargepointListItem>
+        }.map { it.convert(referenceData, false) }.distinct() as List<ChargepointListItem>
 
         // apply clustering
-        val useClustering = zoom < 13
+        val useClustering = zoom < clusterThreshold
         if (useClustering) {
             val clusterDistance = getClusterDistance(zoom)
             Dispatchers.IO.run {
@@ -256,7 +258,7 @@ class OpenChargeMapApiWrapper(
         try {
             val response = api.getChargepointDetail(id)
             if (response.isSuccessful && response.body()?.size == 1) {
-                return Resource.success(response.body()!![0].convert(referenceData))
+                return Resource.success(response.body()!![0].convert(referenceData, true))
             } else {
                 return Resource.error(response.message(), null)
             }

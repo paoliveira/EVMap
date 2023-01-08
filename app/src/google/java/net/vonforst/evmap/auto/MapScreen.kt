@@ -2,171 +2,282 @@ package net.vonforst.evmap.auto
 
 import android.content.pm.PackageManager
 import android.location.Location
+import android.os.Handler
+import android.os.Looper
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import androidx.car.app.CarContext
-import androidx.car.app.CarToast
 import androidx.car.app.Screen
 import androidx.car.app.constraints.ConstraintManager
 import androidx.car.app.hardware.CarHardwareManager
+import androidx.car.app.hardware.info.CarInfo
+import androidx.car.app.hardware.info.CarSensors
+import androidx.car.app.hardware.info.Compass
 import androidx.car.app.hardware.info.EnergyLevel
 import androidx.car.app.model.*
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.OnLifecycleEvent
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.car2go.maps.model.LatLng
 import kotlinx.coroutines.*
+import net.vonforst.evmap.BuildConfig
 import net.vonforst.evmap.R
 import net.vonforst.evmap.api.availability.ChargeLocationStatus
 import net.vonforst.evmap.api.availability.getAvailability
 import net.vonforst.evmap.api.createApi
 import net.vonforst.evmap.api.stringProvider
 import net.vonforst.evmap.model.ChargeLocation
-import net.vonforst.evmap.model.FILTERS_CUSTOM
-import net.vonforst.evmap.model.FILTERS_DISABLED
 import net.vonforst.evmap.model.FILTERS_FAVORITES
+import net.vonforst.evmap.model.FilterValue
+import net.vonforst.evmap.model.FilterWithValue
 import net.vonforst.evmap.storage.AppDatabase
+import net.vonforst.evmap.storage.ChargeLocationsRepository
 import net.vonforst.evmap.storage.PreferenceDataSource
 import net.vonforst.evmap.ui.availabilityText
 import net.vonforst.evmap.ui.getMarkerTint
+import net.vonforst.evmap.utils.bearingBetween
 import net.vonforst.evmap.utils.distanceBetween
+import net.vonforst.evmap.utils.headingDiff
+import net.vonforst.evmap.viewmodel.Status
+import net.vonforst.evmap.viewmodel.awaitFinished
 import net.vonforst.evmap.viewmodel.filtersWithValue
-import net.vonforst.evmap.viewmodel.getFilterValues
-import net.vonforst.evmap.viewmodel.getFilters
-import net.vonforst.evmap.viewmodel.getReferenceData
 import java.io.IOException
 import java.time.Duration
 import java.time.Instant
 import java.time.ZonedDateTime
 import kotlin.collections.set
+import kotlin.math.abs
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
  * Main map screen showing either nearby chargers or favorites
  */
-class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boolean = false) :
-    Screen(ctx), LocationAwareScreen {
-    private var updateCoroutine: Job? = null
-    private var numUpdates = 0
+@androidx.car.app.annotations.ExperimentalCarApi
+class MapScreen(ctx: CarContext, val session: EVMapSession) :
+    Screen(ctx), LocationAwareScreen, OnContentRefreshListener,
+    ItemList.OnItemVisibilityChangedListener, DefaultLifecycleObserver {
+    companion object {
+        val MARKER = "map"
+    }
 
-    /* Updating map contents is disabled - if the user uses Chargeprice from the charger
-       detail screen, this already means 4 steps, after which the app would crash.
-       follow https://issuetracker.google.com/issues/176694222 for updates how to solve this. */
-    private val maxNumUpdates = 1
+    private var updateCoroutine: Job? = null
+    private var availabilityUpdateCoroutine: Job? = null
+
+    private var visibleStart: Int? = null
+    private var visibleEnd: Int? = null
 
     private var location: Location? = null
-    private var lastChargerUpdateLocation: Location? = null
     private var lastDistanceUpdateTime: Instant? = null
+    private var lastChargersUpdateTime: Instant? = null
     private var chargers: List<ChargeLocation>? = null
+    private var loadingError = false
+    private var locationError = false
     private var prefs = PreferenceDataSource(ctx)
     private val db = AppDatabase.getInstance(carContext)
-    private val api by lazy {
-        createApi(prefs.dataSource, ctx)
-    }
+    private val repo =
+        ChargeLocationsRepository(createApi(prefs.dataSource, ctx), lifecycleScope, db, prefs)
     private val searchRadius = 5 // kilometers
-    private val chargerUpdateThreshold = 2000 // meters
     private val distanceUpdateThreshold = Duration.ofSeconds(15)
     private val availabilityUpdateThreshold = Duration.ofMinutes(1)
-    private var availabilities: MutableMap<Long, Pair<ZonedDateTime, ChargeLocationStatus>> =
+    private val chargersUpdateThresholdDistance = 500  // meters
+    private val chargersUpdateThresholdTime = Duration.ofSeconds(30)
+    private var availabilities: MutableMap<Long, Pair<ZonedDateTime, ChargeLocationStatus?>> =
         HashMap()
-    private val maxRows = if (ctx.carAppApiLevel >= 2) {
-        ctx.constraintManager.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_PLACE_LIST)
-    } else 6
+    private val maxRows =
+        min(ctx.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_PLACE_LIST), 25)
+    private val supportsRefresh = ctx.isAppDrivenRefreshSupported
 
-    private val referenceData = api.getReferenceData(lifecycleScope, carContext)
-    private val filterStatus = MutableLiveData<Long>().apply {
-        value = prefs.filterStatus.takeUnless { it == FILTERS_CUSTOM || it == FILTERS_FAVORITES }
-            ?: FILTERS_DISABLED
+    private var filterStatus = prefs.filterStatus
+    private var filtersWithValue: List<FilterWithValue<FilterValue>>? = null
+
+    private val carInfo: CarInfo by lazy {
+        (ctx.getCarService(CarContext.HARDWARE_SERVICE) as CarHardwareManager).carInfo
     }
-    private val filterValues = db.filterValueDao().getFilterValues(filterStatus, prefs.dataSource)
-    private val filters = api.getFilters(referenceData, carContext.stringProvider())
-    private val filtersWithValue = filtersWithValue(filters, filterValues)
-
-    private val hardwareMan = ctx.getCarService(CarContext.HARDWARE_SERVICE) as CarHardwareManager
+    private val carSensors: CarSensors by lazy { carContext.patchedCarSensors }
     private var energyLevel: EnergyLevel? = null
+    private var heading: Compass? = null
+    private val permissions = if (BuildConfig.FLAVOR_automotive == "automotive") {
+        listOf(
+            "android.car.permission.CAR_ENERGY",
+            "android.car.permission.CAR_ENERGY_PORTS",
+            "android.car.permission.READ_CAR_DISPLAY_UNITS",
+        )
+    } else {
+        listOf(
+            "com.google.android.gms.permission.CAR_FUEL"
+        )
+    }
+
+    private var searchLocation: LatLng? = null
 
     init {
-        filtersWithValue.observe(this) {
-            loadChargers()
-        }
+        lifecycle.addObserver(this)
+        marker = MARKER
     }
 
     override fun onGetTemplate(): Template {
         session.mapScreen = this
         return PlaceListMapTemplate.Builder().apply {
             setTitle(
-                carContext.getString(
-                    if (favorites) {
+                prefs.placeSearchResultAndroidAutoName?.let {
+                    carContext.getString(R.string.auto_chargers_near_location, it)
+                } ?: carContext.getString(
+                    if (filterStatus == FILTERS_FAVORITES) {
                         R.string.auto_favorites
                     } else {
                         R.string.auto_chargers_closeby
                     }
                 )
             )
-            location?.let {
-                setAnchor(Place.Builder(CarLocation.create(it)).build())
-            } ?: setLoading(true)
+            if (prefs.placeSearchResultAndroidAutoName != null) {
+                searchLocation?.let {
+                    setAnchor(Place.Builder(CarLocation.create(it.latitude, it.longitude)).apply {
+                        if (prefs.placeSearchResultAndroidAutoName != null) {
+                            setMarker(
+                                PlaceMarker.Builder()
+                                    .setColor(CarColor.PRIMARY)
+                                    .build()
+                            )
+                        }
+                    }.build())
+                }
+            } else {
+                location?.let {
+                    setAnchor(Place.Builder(CarLocation.create(it.latitude, it.longitude)).build())
+                }
+            }
             chargers?.take(maxRows)?.let { chargerList ->
                 val builder = ItemList.Builder()
                 // only show the city if not all chargers are in the same city
-                val showCity = chargerList.map { it.address.city }.distinct().size > 1
+                val showCity = chargerList.map { it.address?.city }.distinct().size > 1
                 chargerList.forEach { charger ->
                     builder.addItem(formatCharger(charger, showCity))
                 }
                 builder.setNoItemsMessage(
                     carContext.getString(
-                        if (favorites) {
+                        if (filterStatus == FILTERS_FAVORITES) {
                             R.string.auto_no_favorites_found
                         } else {
                             R.string.auto_no_chargers_found
                         }
                     )
                 )
+                builder.setOnItemsVisibilityChangedListener(this@MapScreen)
                 setItemList(builder.build())
-            } ?: setLoading(true)
+            } ?: run {
+                if (loadingError) {
+                    val builder = ItemList.Builder()
+                    builder.setNoItemsMessage(
+                        carContext.getString(R.string.connection_error)
+                    )
+                    setItemList(builder.build())
+                } else if (locationError) {
+                    val builder = ItemList.Builder()
+                    builder.setNoItemsMessage(
+                        carContext.getString(R.string.location_error)
+                    )
+                    setItemList(builder.build())
+                } else {
+                    setLoading(true)
+                }
+            }
             setCurrentLocationEnabled(true)
-            setHeaderAction(Action.BACK)
-            if (!favorites) {
-                val filtersCount = filtersWithValue.value?.count {
+            setHeaderAction(Action.APP_ICON)
+            val filtersCount = if (filterStatus == FILTERS_FAVORITES) 1 else {
+                filtersWithValue?.count {
                     !it.value.hasSameValueAs(it.filter.defaultValue())
                 }
+            }
 
-                setActionStrip(
-                    ActionStrip.Builder()
-                        .addAction(
-                            Action.Builder()
-                                .setIcon(
-                                    CarIcon.Builder(
-                                        IconCompat.createWithResource(
-                                            carContext,
-                                            R.drawable.ic_filter
-                                        )
-                                    )
-                                        .setTint(if (filtersCount != null && filtersCount > 0) CarColor.SECONDARY else CarColor.DEFAULT)
-                                        .build()
+            setActionStrip(
+                ActionStrip.Builder()
+                    .addAction(
+                        Action.Builder()
+                            .setIcon(
+                                CarIcon.Builder(
+                                    IconCompat.createWithResource(
+                                    carContext,
+                                    R.drawable.ic_settings
+                                )
+                            ).setTint(CarColor.DEFAULT).build()
                         )
                         .setOnClickListener {
-                            screenManager.pushForResult(FilterScreen(carContext)) {
-                                chargers = null
-                                numUpdates = 0
-                                filterStatus.value =
-                                    prefs.filterStatus.takeUnless { it == FILTERS_CUSTOM || it == FILTERS_FAVORITES }
-                                        ?: FILTERS_DISABLED
-                            }
+                            screenManager.push(SettingsScreen(carContext, session))
                             session.mapScreen = null
                         }
                         .build())
+                    .addAction(Action.Builder().apply {
+                        setIcon(
+                            CarIcon.Builder(
+                                IconCompat.createWithResource(
+                                    carContext,
+                                    if (prefs.placeSearchResultAndroidAuto != null) {
+                                        R.drawable.ic_search_off
+                                    } else {
+                                        R.drawable.ic_search
+                                    }
+                                )
+                            ).build()
+
+                        )
+                        setOnClickListener {
+                            if (prefs.placeSearchResultAndroidAuto != null) {
+                                prefs.placeSearchResultAndroidAutoName = null
+                                prefs.placeSearchResultAndroidAuto = null
+                                if (!supportsRefresh) {
+                                    screenManager.pushForResult(DummyReturnScreen(carContext)) {
+                                        chargers = null
+                                        loadChargers()
+                                    }
+                                } else {
+                                    chargers = null
+                                    loadChargers()
+                                }
+                            } else {
+                                screenManager.pushForResult(
+                                    PlaceSearchScreen(
+                                        carContext,
+                                        session
+                                    )
+                                ) {
+                                    chargers = null
+                                    loadChargers()
+                                }
+                                session.mapScreen = null
+                            }
+                        }
+                    }.build())
+                    .addAction(
+                        Action.Builder()
+                            .setIcon(
+                                CarIcon.Builder(
+                                    IconCompat.createWithResource(
+                                        carContext,
+                                        R.drawable.ic_filter
+                                    )
+                                )
+                                    .setTint(if (filtersCount != null && filtersCount > 0) CarColor.SECONDARY else CarColor.DEFAULT)
+                                    .build()
+                            )
+                            .setOnClickListener {
+                                screenManager.push(FilterScreen(carContext, session))
+                                session.mapScreen = null
+                            }
+                            .build())
                     .build())
+            if (carContext.carAppApiLevel >= 5 ||
+                (BuildConfig.FLAVOR_automotive == "automotive" && carContext.carAppApiLevel >= 4)
+            ) {
+                setOnContentRefreshListener(this@MapScreen)
             }
-            build()
         }.build()
     }
 
     private fun formatCharger(charger: ChargeLocation, showCity: Boolean): Row {
-        val markerTint = if (charger.maxPower > 100) {
+        val markerTint = if ((charger.maxPower ?: 0.0) > 100) {
             R.color.charger_100kw_dark  // slightly darker color for better contrast
         } else {
             getMarkerTint(charger)
@@ -184,7 +295,7 @@ class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boole
         return Row.Builder().apply {
             // only show the city if not all chargers are in the same city (-> showCity == true)
             // and the city is not already contained in the charger name
-            if (showCity && charger.address.city != null && charger.address.city !in charger.name) {
+            if (showCity && charger.address?.city != null && charger.address.city !in charger.name) {
                 setTitle(
                     CarText.Builder("${charger.name} · ${charger.address.city}")
                     .addVariant(charger.name)
@@ -214,8 +325,11 @@ class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boole
             }
 
             // power
-            if (text.isNotEmpty()) text.append(" · ")
-            text.append("${charger.maxPower.roundToInt()} kW")
+            val power = charger.maxPower;
+            if (power != null) {
+                if (text.isNotEmpty()) text.append(" · ")
+                text.append("${power.roundToInt()} kW")
+            }
 
             // availability
             availabilities[charger.id]?.second?.let { av ->
@@ -240,6 +354,7 @@ class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boole
 
             setOnClickListener {
                 screenManager.push(ChargerDetailScreen(carContext, charger))
+                session.mapScreen = null
             }
         }.build()
     }
@@ -250,9 +365,10 @@ class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boole
         ) {
             return
         }
+        val previousLocation = this.location
         this.location = location
-        if (updateCoroutine != null) {
-            // don't update while still loading last update
+        if (previousLocation == null) {
+            loadChargers()
             return
         }
 
@@ -265,119 +381,242 @@ class MapScreen(ctx: CarContext, val session: EVMapSession, val favorites: Boole
             invalidate()
         }
 
-        if (lastChargerUpdateLocation == null ||
-            location.distanceTo(lastChargerUpdateLocation) > chargerUpdateThreshold
+        // if chargers are searched around current location, consider app-driven refresh
+        val searchLocation =
+            if (prefs.placeSearchResultAndroidAuto == null) searchLocation else null
+        val distance = searchLocation?.let {
+            distanceBetween(
+                it.latitude, it.longitude, location.latitude, location.longitude
+            )
+        } ?: 0.0
+        if (supportsRefresh && (lastChargersUpdateTime == null ||
+                    Duration.between(
+                        lastChargersUpdateTime,
+                        now
+                    ) > chargersUpdateThresholdTime) && (distance > chargersUpdateThresholdDistance)
         ) {
-            lastChargerUpdateLocation = location
-            // update displayed chargers
-            loadChargers()
+            onContentRefreshRequested()
         }
     }
 
     private fun loadChargers() {
         val location = location ?: return
-        val referenceData = referenceData.value ?: return
-        val filters = filtersWithValue.value ?: return
 
-        numUpdates++
-        println(numUpdates)
-        if (numUpdates > maxNumUpdates) {
-            /*CarToast.makeText(carContext, R.string.auto_no_refresh_possible, CarToast.LENGTH_LONG)
-                .show()*/
-            return
-        }
+        val searchLocation =
+            prefs.placeSearchResultAndroidAuto ?: LatLng.fromLocation(location)
+        this.searchLocation = searchLocation
+
         updateCoroutine = lifecycleScope.launch {
+            loadingError = false
             try {
+                filterStatus = prefs.filterStatus
+                val filterValues =
+                    db.filterValueDao().getFilterValuesAsync(filterStatus, prefs.dataSource)
+                val filters = repo.getFiltersAsync(carContext.stringProvider())
+                filtersWithValue = filtersWithValue(filters, filterValues)
+
                 // load chargers
-                if (favorites) {
-                    chargers = db.chargeLocationsDao().getAllChargeLocationsAsync().sortedBy {
-                        distanceBetween(
-                            location.latitude, location.longitude,
-                            it.coordinates.lat, it.coordinates.lng
-                        )
-                    }
-                } else {
-                    val response = api.getChargepointsRadius(
-                        referenceData,
-                        LatLng.fromLocation(location),
-                        searchRadius,
-                        zoom = 16f,
-                        filters
-                    )
-                    chargers = response.data?.filterIsInstance(ChargeLocation::class.java)
-                    chargers?.let {
-                        if (it.size < maxRows) {
-                            // try again with larger radius
-                            val response = api.getChargepointsRadius(
-                                referenceData,
-                                LatLng.fromLocation(location),
-                                searchRadius * 10,
-                                zoom = 16f,
-                                filters
+                if (filterStatus == FILTERS_FAVORITES) {
+                    chargers =
+                        db.favoritesDao().getAllFavoritesAsync().map { it.charger }.sortedBy {
+                            distanceBetween(
+                                location.latitude, location.longitude,
+                                it.coordinates.lat, it.coordinates.lng
                             )
-                            chargers =
-                                response.data?.filterIsInstance(ChargeLocation::class.java)
+                        }
+                } else {
+                    // try multiple search radii until we have enough chargers
+                    var chargers: List<ChargeLocation>? = null
+                    for (radius in listOf(searchRadius, searchRadius * 10, searchRadius * 50)) {
+                        val response = repo.getChargepointsRadius(
+                            searchLocation,
+                            radius,
+                            zoom = 16f,
+                            filtersWithValue
+                        ).awaitFinished()
+                        if (response.status == Status.ERROR) {
+                            loadingError = true
+                            this@MapScreen.chargers = null
+                            invalidate()
+                            return@launch
+                        }
+                        chargers = response.data?.filterIsInstance(ChargeLocation::class.java)
+                        if (prefs.placeSearchResultAndroidAutoName == null) {
+                            chargers = headingFilter(
+                                chargers,
+                                searchLocation
+                            )
+                        }
+                        if (chargers == null || chargers.size >= maxRows) {
+                            break
                         }
                     }
+                    this@MapScreen.chargers = chargers
                 }
 
-                // remove outdated availabilities
-                availabilities = availabilities.filter {
-                    Duration.between(
-                        it.value.first,
-                        ZonedDateTime.now()
-                    ) > availabilityUpdateThreshold
-                }.toMutableMap()
-
-                // update availabilities
-                chargers?.take(maxRows)?.map {
-                    lifecycleScope.async {
-                        // update only if not yet stored
-                        if (!availabilities.containsKey(it.id)) {
-                            val date = ZonedDateTime.now()
-                            val availability = getAvailability(it).data
-                            if (availability != null) {
-                                availabilities[it.id] = date to availability
-                            }
-                        }
-                    }
-                }?.awaitAll()
-
                 updateCoroutine = null
+                lastChargersUpdateTime = Instant.now()
                 lastDistanceUpdateTime = Instant.now()
                 invalidate()
             } catch (e: IOException) {
-                withContext(Dispatchers.Main) {
-                    CarToast.makeText(carContext, R.string.connection_error, CarToast.LENGTH_LONG)
-                        .show()
-                }
+                loadingError = true
+                invalidate()
             }
         }
     }
 
-    private fun onEnergyLevelUpdated(energyLevel: EnergyLevel) {
-        this.energyLevel = energyLevel
-        invalidate()
+    /**
+     * Filters by heading if heading available and enabled
+     */
+    private fun headingFilter(
+        chargers: List<ChargeLocation>?,
+        searchLocation: LatLng
+    ): List<ChargeLocation>? {
+        // use compass heading if available, otherwise fall back to GPS
+        val location = location
+        val heading = heading?.orientations?.value?.get(0)
+            ?: if (location?.hasBearing() == true) location.bearing else null
+        return heading?.let { heading ->
+            if (!prefs.showChargersAheadAndroidAuto) return@let chargers
+
+            chargers?.filter {
+                val bearing = bearingBetween(
+                    searchLocation.latitude,
+                    searchLocation.longitude,
+                    it.coordinates.lat,
+                    it.coordinates.lng
+                )
+                val diff = headingDiff(bearing, heading.toDouble())
+                abs(diff) < 30
+            }
+        } ?: chargers
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    private fun onEnergyLevelUpdated(energyLevel: EnergyLevel) {
+        val isUpdate = this.energyLevel == null
+        this.energyLevel = energyLevel
+        if (isUpdate) invalidate()
+    }
+
+    private fun onCompassUpdated(compass: Compass) {
+        this.heading = compass
+    }
+
+    override fun onStart(owner: LifecycleOwner) {
+        setupListeners()
+        session.requestLocationUpdates()
+        locationError = false
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (location == null) {
+                locationError = true
+                invalidate()
+            }
+        }, 5000)
+
+        // Reloading chargers in onStart does not seem to count towards content limit.
+        // So let's do this so the user gets fresh chargers when re-entering the app.
+        if (prefs.dataSource != repo.api.value?.id) {
+            repo.api.value = createApi(prefs.dataSource, carContext)
+        }
+        invalidate()
+        loadChargers()
+    }
+
     private fun setupListeners() {
-        if (ContextCompat.checkSelfPermission(
-                carContext,
-                "com.google.android.gms.permission.CAR_FUEL"
-            ) != PackageManager.PERMISSION_GRANTED
-        )
+        val exec = ContextCompat.getMainExecutor(carContext)
+        if (supportsCarApiLevel3(carContext)) {
+            carSensors.addCompassListener(
+                CarSensors.UPDATE_RATE_NORMAL,
+                exec,
+                ::onCompassUpdated
+            )
+        }
+        if (!permissions.all {
+                ContextCompat.checkSelfPermission(
+                    carContext,
+                    it
+                ) == PackageManager.PERMISSION_GRANTED
+            })
             return
 
-        println("Setting up energy level listener")
-
-        val exec = ContextCompat.getMainExecutor(carContext)
-        hardwareMan.carInfo.addEnergyLevelListener(exec, ::onEnergyLevelUpdated)
+        if (supportsCarApiLevel3(carContext)) {
+            println("Setting up energy level listener")
+            carInfo.addEnergyLevelListener(exec, ::onEnergyLevelUpdated)
+        }
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    override fun onStop(owner: LifecycleOwner) {
+        // Reloading chargers in onStart does not seem to count towards content limit.
+        // So let's do this so the user gets fresh chargers when re-entering the app.
+        // Deleting the data already in onStop makes sure that we show a loading screen directly
+        // (i.e. onGetTemplate is not called while the old data is still there)
+        chargers = null
+        availabilities.clear()
+        location = null
+        removeListeners()
+    }
+
     private fun removeListeners() {
-        println("Removing energy level listener")
-        hardwareMan.carInfo.removeEnergyLevelListener(::onEnergyLevelUpdated)
+        if (supportsCarApiLevel3(carContext)) {
+            println("Removing energy level listener")
+            carInfo.removeEnergyLevelListener(::onEnergyLevelUpdated)
+            carSensors.removeCompassListener(::onCompassUpdated)
+        }
+    }
+
+    override fun onContentRefreshRequested() {
+        loadChargers()
+        availabilities.clear()
+
+        val start = visibleStart
+        val end = visibleEnd
+        if (start != null && end != null) {
+            onItemVisibilityChanged(start, end)
+        }
+    }
+
+    override fun onItemVisibilityChanged(startIndex: Int, endIndex: Int) {
+        // when the list is scrolled, load corresponding availabilities
+        if (startIndex == visibleStart && endIndex == visibleEnd && !availabilities.isEmpty()) return
+        if (startIndex == -1 || endIndex == -1) return
+        if (availabilityUpdateCoroutine != null) return
+
+        visibleEnd = endIndex
+        visibleStart = startIndex
+
+        // remove outdated availabilities
+        availabilities = availabilities.filter {
+            Duration.between(
+                it.value.first,
+                ZonedDateTime.now()
+            ) <= availabilityUpdateThreshold
+        }.toMutableMap()
+
+        // update availabilities
+        availabilityUpdateCoroutine = lifecycleScope.launch {
+            delay(300L)
+
+            val chargers = chargers ?: return@launch
+            if (chargers.isEmpty()) return@launch
+
+            val tasks = chargers.subList(
+                min(startIndex, chargers.size - 1),
+                min(endIndex, chargers.size - 1)
+            ).mapNotNull {
+                // update only if not yet stored
+                if (!availabilities.containsKey(it.id)) {
+                    lifecycleScope.async {
+                        val availability = getAvailability(it).data
+                        val date = ZonedDateTime.now()
+                        availabilities[it.id] = date to availability
+                    }
+                } else null
+            }
+            if (tasks.isNotEmpty()) {
+                tasks.awaitAll()
+                invalidate()
+            }
+            availabilityUpdateCoroutine = null
+        }
     }
 }

@@ -11,11 +11,14 @@ import net.vonforst.evmap.viewmodel.SettingsViewModel
 import net.vonforst.evmap.viewmodel.viewModelFactory
 
 class DataSettingsFragment : BaseSettingsFragment() {
+    override val isTopLevel = false
+
     private val vm: SettingsViewModel by viewModels(factoryProducer = {
         viewModelFactory {
             SettingsViewModel(
                 requireActivity().application,
-                getString(R.string.chargeprice_key)
+                getString(R.string.chargeprice_key),
+                getString(R.string.chargeprice_api_url)
             )
         }
     })
@@ -45,8 +48,8 @@ class DataSettingsFragment : BaseSettingsFragment() {
         }
     }
 
-    override fun onPreferenceTreeClick(preference: Preference?): Boolean {
-        return when (preference?.key) {
+    override fun onPreferenceTreeClick(preference: Preference): Boolean {
+        return when (preference.key) {
             "search_delete_recent" -> {
                 Snackbar.make(
                     requireView(),

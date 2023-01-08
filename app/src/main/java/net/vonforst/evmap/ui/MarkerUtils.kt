@@ -13,13 +13,21 @@ import kotlin.math.max
 fun getMarkerTint(
     charger: ChargeLocation,
     connectors: Set<String>? = null
-): Int = when {
-    charger.maxPower(connectors) >= 100 -> R.color.charger_100kw
-    charger.maxPower(connectors) >= 43 -> R.color.charger_43kw
-    charger.maxPower(connectors) >= 20 -> R.color.charger_20kw
-    charger.maxPower(connectors) >= 11 -> R.color.charger_11kw
-    else -> R.color.charger_low
+): Int {
+    val maxPower = charger.maxPower(connectors)
+    return when {
+        maxPower == null -> R.color.charger_low
+        maxPower >= 100 -> R.color.charger_100kw
+        maxPower >= 43 -> R.color.charger_43kw
+        maxPower >= 20 -> R.color.charger_20kw
+        maxPower >= 11 -> R.color.charger_11kw
+        else -> R.color.charger_low
+    }
 }
+
+val chargerZ = 1
+val clusterZ = chargerZ + 1
+val placeSearchZ = clusterZ + 1
 
 class MarkerAnimator(val gen: ChargerIconGenerator) {
     private val animatingMarkers = hashMapOf<Marker, ValueAnimator>()
@@ -30,7 +38,8 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
         highlight: Boolean,
         fault: Boolean,
         multi: Boolean,
-        fav: Boolean
+        fav: Boolean,
+        mini: Boolean
     ) {
         animatingMarkers[marker]?.let {
             it.cancel()
@@ -49,7 +58,8 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
                         highlight = highlight,
                         fault = fault,
                         multi = multi,
-                        fav = fav
+                        fav = fav,
+                        mini = mini
                     )
                 )
             }
@@ -69,7 +79,8 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
         highlight: Boolean,
         fault: Boolean,
         multi: Boolean,
-        fav: Boolean
+        fav: Boolean,
+        mini: Boolean
     ) {
         animatingMarkers[marker]?.let {
             it.cancel()
@@ -88,7 +99,8 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
                         highlight = highlight,
                         fault = fault,
                         multi = multi,
-                        fav = fav
+                        fav = fav,
+                        mini = mini
                     )
                 )
             }
@@ -112,7 +124,7 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
         marker.remove()
     }
 
-    fun animateMarkerBounce(marker: Marker) {
+    fun animateMarkerBounce(marker: Marker, mini: Boolean) {
         animatingMarkers[marker]?.let {
             it.cancel()
             animatingMarkers.remove(marker)
@@ -123,7 +135,7 @@ class MarkerAnimator(val gen: ChargerIconGenerator) {
             interpolator = BounceInterpolator()
             addUpdateListener { state ->
                 val t = max(1f - state.animatedValue as Float, 0f) / 2
-                marker.setAnchor(0.5f, 1.0f + t)
+                marker.setAnchor(0.5f, (if (mini) 0.5f else 1.0f) + t)
             }
             addListener(onEnd = {
                 animatingMarkers.remove(marker)

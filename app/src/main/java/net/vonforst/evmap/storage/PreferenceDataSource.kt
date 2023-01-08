@@ -3,6 +3,7 @@ package net.vonforst.evmap.storage
 import android.content.Context
 import androidx.preference.PreferenceManager
 import com.car2go.maps.AnyMap
+import com.car2go.maps.model.LatLng
 import net.vonforst.evmap.R
 import net.vonforst.evmap.model.FILTERS_CUSTOM
 import net.vonforst.evmap.model.FILTERS_DISABLED
@@ -27,6 +28,12 @@ class PreferenceDataSource(val context: Context) {
         get() = sp.getBoolean("navigate_use_maps", true)
         set(value) {
             sp.edit().putBoolean("navigate_use_maps", value).apply()
+        }
+
+    var mapRotateGesturesEnabled: Boolean
+        get() = sp.getBoolean("map_rotate_gestures_enabled", true)
+        set(value) {
+            sp.edit().putBoolean("map_rotate_gestures_enabled", value).apply()
         }
 
     var lastGeReferenceDataUpdate: Instant
@@ -68,8 +75,15 @@ class PreferenceDataSource(val context: Context) {
         }
 
 
-    val language: String
-        get() = sp.getString("language", "default")!!
+    /**
+     * Sets app language. Will be removed and set to null with the next update because storage is
+     * handled by AppCompat.
+     */
+    var language: String?
+        get() = sp.getString("language", null)
+        set(lang) {
+            sp.edit().putString("language", lang).apply()
+        }
 
     val darkmode: String
         get() = sp.getString("darkmode", "default")!!
@@ -80,11 +94,14 @@ class PreferenceDataSource(val context: Context) {
             context.getString(R.string.pref_map_provider_default)
         )!!
 
-    val searchProvider: String
+    var searchProvider: String
         get() = sp.getString(
             "search_provider",
             context.getString(R.string.pref_search_provider_default)
         )!!
+        set(value) {
+            sp.edit().putString("search_provider", value).apply()
+        }
 
     var mapType: AnyMap.Type
         get() = AnyMap.Type.valueOf(sp.getString("map_type", null) ?: AnyMap.Type.NORMAL.toString())
@@ -151,6 +168,12 @@ class PreferenceDataSource(val context: Context) {
             sp.edit().putBoolean("chargeprice_show_provider_customer_tariffs", value).apply()
         }
 
+    var chargepriceAllowUnbalancedLoad: Boolean
+        get() = sp.getBoolean("chargeprice_allow_unbalanced_load", false)
+        set(value) {
+            sp.edit().putBoolean("chargeprice_allow_unbalanced_load", value).apply()
+        }
+
     var chargepriceCurrency: String
         get() = sp.getString("chargeprice_currency", null) ?: "EUR"
         set(value) {
@@ -168,6 +191,17 @@ class PreferenceDataSource(val context: Context) {
                 .apply()
         }
 
+    var chargepriceBatteryRangeAndroidAuto: List<Float>
+        get() = listOf(
+            sp.getFloat("chargeprice_battery_range_android_auto_min", 20f),
+            sp.getFloat("chargeprice_battery_range_android_auto_max", 80f),
+        )
+        set(value) {
+            sp.edit().putFloat("chargeprice_battery_range_android_auto_min", value[0])
+                .putFloat("chargeprice_battery_range_android_auto_max", value[1])
+                .apply()
+        }
+
     /** App start counter, introduced with Version 1.0.0 */
     var appStartCounter: Long
         get() = sp.getLong("app_start_counter", 0)
@@ -175,9 +209,56 @@ class PreferenceDataSource(val context: Context) {
             sp.edit().putLong("app_start_counter", value).apply()
         }
 
+    /** Counter for how many times the price comparison page was opened,
+     * introduced with Version 1.3.4 **/
+    var chargepriceCounter: Long
+        get() = sp.getLong("chargeprice_counter", 0)
+        set(value) {
+            sp.edit().putLong("chargeprice_counter", value).apply()
+        }
+
     var opensourceDonationsDialogShown: Boolean
         get() = sp.getBoolean("opensource_donations_dialog_shown", false)
         set(value) {
             sp.edit().putBoolean("opensource_donations_dialog_shown", value).apply()
+        }
+
+    var placeSearchResultAndroidAuto: LatLng?
+        get() = if (sp.contains("place_search_result_android_auto_lat")) {
+            LatLng(
+                Double.fromBits(sp.getLong("place_search_result_android_auto_lat", 0L)),
+                Double.fromBits(sp.getLong("place_search_result_android_auto_lng", 0L))
+            )
+        } else null
+        set(value) {
+            if (value == null) {
+                sp.edit().remove("place_search_result_android_auto_lat")
+                    .remove("place_search_result_android_auto_lng").apply()
+            } else {
+                sp.edit().putLong("place_search_result_android_auto_lat", value.latitude.toBits())
+                    .putLong("place_search_result_android_auto_lng", value.longitude.toBits())
+                    .apply()
+            }
+        }
+
+    var placeSearchResultAndroidAutoName: String?
+        get() = sp.getString("place_search_result_android_auto_name", null)
+        set(value) {
+            sp.edit().putString("place_search_result_android_auto_name", value).apply()
+        }
+
+    var showChargersAheadAndroidAuto: Boolean
+        get() = sp.getBoolean("show_chargers_ahead_android_auto", false)
+        set(value) {
+            sp.edit().putBoolean("show_chargers_ahead_android_auto", value).apply()
+        }
+
+    val predictionEnabled: Boolean
+        get() = sp.getBoolean("prediction_enabled", true)
+
+    var developerModeEnabled: Boolean
+        get() = sp.getBoolean("dev_mode_enabled", false)
+        set(value) {
+            sp.edit().putBoolean("dev_mode_enabled", value).apply()
         }
 }

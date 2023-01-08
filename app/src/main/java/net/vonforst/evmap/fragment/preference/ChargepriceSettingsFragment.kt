@@ -10,11 +10,14 @@ import net.vonforst.evmap.viewmodel.SettingsViewModel
 import net.vonforst.evmap.viewmodel.viewModelFactory
 
 class ChargepriceSettingsFragment : BaseSettingsFragment() {
+    override val isTopLevel = false
+
     private val vm: SettingsViewModel by viewModels(factoryProducer = {
         viewModelFactory {
             SettingsViewModel(
                 requireActivity().application,
-                getString(R.string.chargeprice_key)
+                getString(R.string.chargeprice_key),
+                getString(R.string.chargeprice_api_url)
             )
         }
     })
@@ -67,7 +70,8 @@ class ChargepriceSettingsFragment : BaseSettingsFragment() {
                         R.plurals.chargeprice_some_tariffs_selected,
                         n,
                         n
-                    ) + "\n" + getString(R.string.pref_my_tariffs_summary)
+                    ) + "\n" + requireContext().resources
+                    .getQuantityString(R.plurals.pref_my_tariffs_summary, n)
             }
     }
 

@@ -1,34 +1,125 @@
 package net.vonforst.evmap.storage
 
-import androidx.lifecycle.LiveData
-import androidx.room.*
-import net.vonforst.evmap.model.ChargeLocation
+import androidx.lifecycle.*
+import androidx.room.Dao
+import androidx.room.Delete
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import com.car2go.maps.model.LatLng
+import com.car2go.maps.model.LatLngBounds
+import kotlinx.coroutines.CoroutineScope
+import net.vonforst.evmap.api.ChargepointApi
+import net.vonforst.evmap.api.StringProvider
+import net.vonforst.evmap.api.goingelectric.GEReferenceData
+import net.vonforst.evmap.api.goingelectric.GoingElectricApiWrapper
+import net.vonforst.evmap.api.openchargemap.OpenChargeMapApiWrapper
+import net.vonforst.evmap.model.*
+import net.vonforst.evmap.viewmodel.Resource
+import net.vonforst.evmap.viewmodel.await
 
 @Dao
-interface ChargeLocationsDao {
+abstract class ChargeLocationsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(vararg locations: ChargeLocation)
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    fun insertBlocking(vararg locations: ChargeLocation)
+    abstract suspend fun insert(vararg locations: ChargeLocation)
 
     @Delete
-    suspend fun delete(vararg locations: ChargeLocation)
+    abstract suspend fun delete(vararg locations: ChargeLocation)
+}
 
-    @Query("SELECT * FROM chargelocation")
-    fun getAllChargeLocations(): LiveData<List<ChargeLocation>>
+/**
+ * The ChargeLocationsRepository wraps the ChargepointApi and the DB to provide caching
+ * functionality.
+ */
+class ChargeLocationsRepository(
+    api: ChargepointApi<ReferenceData>, private val scope: CoroutineScope,
+    private val db: AppDatabase, private val prefs: PreferenceDataSource
+) {
+    val api = MutableLiveData<ChargepointApi<ReferenceData>>().apply { value = api }
 
-    @Query("SELECT * FROM chargelocation")
-    suspend fun getAllChargeLocationsAsync(): List<ChargeLocation>
+    val referenceData = this.api.switchMap { api ->
+        when (api) {
+            is GoingElectricApiWrapper -> {
+                GEReferenceDataRepository(
+                    api,
+                    scope,
+                    db.geReferenceDataDao(),
+                    prefs
+                ).getReferenceData()
+            }
+            is OpenChargeMapApiWrapper -> {
+                OCMReferenceDataRepository(
+                    api,
+                    scope,
+                    db.ocmReferenceDataDao(),
+                    prefs
+                ).getReferenceData()
+            }
+            else -> {
+                throw RuntimeException("no reference data implemented")
+            }
+        }
+    }
 
-    @Query("SELECT * FROM chargelocation")
-    fun getAllChargeLocationsBlocking(): List<ChargeLocation>
+    private val chargeLocationsDao = db.chargeLocationsDao()
 
-    @Query("SELECT * FROM chargelocation WHERE lat >= :lat1 AND lat <= :lat2 AND lng >= :lng1 AND lng <= :lng2")
-    suspend fun getChargeLocationsInBoundsAsync(
-        lat1: Double,
-        lat2: Double,
-        lng1: Double,
-        lng2: Double
-    ): List<ChargeLocation>
+    fun getChargepoints(
+        bounds: LatLngBounds,
+        zoom: Float,
+        filters: FilterValues?
+    ): LiveData<Resource<List<ChargepointListItem>>> {
+        return liveData {
+            val refData = referenceData.await()
+            val result = api.value!!.getChargepoints(refData, bounds, zoom, filters)
+
+            emit(result)
+        }
+    }
+
+    fun getChargepointsRadius(
+        location: LatLng,
+        radius: Int,
+        zoom: Float,
+        filters: FilterValues?
+    ): LiveData<Resource<List<ChargepointListItem>>> {
+        return liveData {
+            val refData = referenceData.await()
+            val result = api.value!!.getChargepointsRadius(refData, location, radius, zoom, filters)
+
+            emit(result)
+        }
+    }
+
+    fun getChargepointDetail(
+        id: Long
+    ): LiveData<Resource<ChargeLocation>> {
+        return liveData {
+            emit(Resource.loading(null))
+            val refData = referenceData.await()
+            val result = api.value!!.getChargepointDetail(refData, id)
+            emit(result)
+        }
+    }
+
+    fun getFilters(sp: StringProvider) = MediatorLiveData<List<Filter<FilterValue>>>().apply {
+        addSource(referenceData) { refData: ReferenceData? ->
+            refData?.let { value = api.value!!.getFilters(refData, sp) }
+        }
+    }
+
+    suspend fun getFiltersAsync(sp: StringProvider): List<Filter<FilterValue>> {
+        val refData = referenceData.await()
+        return api.value!!.getFilters(refData, sp)
+    }
+
+    val chargeCardMap by lazy {
+        referenceData.map { refData: ReferenceData? ->
+            if (refData is GEReferenceData) {
+                refData.chargecards.associate {
+                    it.id to it.convert()
+                }
+            } else {
+                null
+            }
+        }
+    }
 }

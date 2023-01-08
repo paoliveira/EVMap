@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="net.vonforst.evmap">
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
@@ -12,6 +11,7 @@
 
     <queries>
         <package android:name="com.google.android.projection.gearhead" />
+        <package android:name="com.google.android.apps.automotive.templates.host" />
     </queries>
 
     <application>
@@ -39,14 +39,8 @@
             <intent-filter>
                 <action
                     android:name="androidx.car.app.CarAppService"
-                    android:category="androidx.car.app.category.CHARGING" />
+                    android:category="androidx.car.app.category.POI" />
             </intent-filter>
         </service>
-
-        <service
-            android:name=".auto.CarLocationService"
-            android:foregroundServiceType="location"
-            android:enabled="true"
-            android:exported="false" />
     </application>
 </manifest>

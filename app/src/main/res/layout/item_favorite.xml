@@ -50,13 +50,18 @@
 
             <TextView
                 android:id="@+id/textView15"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
                 android:text="@{item.charger.name}"
                 android:textAppearance="@style/TextAppearance.Material3.BodyLarge"
+                android:maxLines="2"
+                android:ellipsize="end"
+                android:hyphenationFrequency="normal"
+                app:layout_constraintEnd_toStartOf="@+id/textView16"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toTopOf="parent"
-                tools:text="Parkhaus" />
+                tools:text="Nikola-Tesla-Parkhaus mit extra langem Namen, der auf mehrere Zeilen umbricht" />
 
         <TextView
             android:id="@+id/textView2"
@@ -67,6 +72,7 @@
             android:maxLines="1"
             android:text="@{item.charger.address.toString()}"
             android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+            app:invisibleUnless="@{item.charger.address != null}"
             app:layout_constraintEnd_toStartOf="@+id/textView7"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@+id/textView15"
@@ -109,7 +115,7 @@
                 android:textAppearance="@style/TextAppearance.AppCompat.Body1"
                 android:textColor="@android:color/white"
                 app:backgroundTintAvailability="@{item.available.data}"
-                app:goneUnless="@{item.available.status == Status.SUCCESS}"
+                app:invisibleUnless="@{item.available.status == Status.SUCCESS}"
                 app:layout_constraintBottom_toBottomOf="parent"
                 app:layout_constraintEnd_toStartOf="@id/btnDelete"
                 tools:backgroundTint="@color/available"

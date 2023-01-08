@@ -17,24 +17,27 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.car2go.maps.model.LatLng
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.snackbar.Snackbar
-import com.mapzen.android.lost.api.LocationServices
-import com.mapzen.android.lost.api.LostApiClient
+import com.google.android.material.transition.MaterialFadeThrough
 import net.vonforst.evmap.MapsActivity
 import net.vonforst.evmap.R
 import net.vonforst.evmap.adapter.DataBindingAdapter
 import net.vonforst.evmap.adapter.FavoritesAdapter
 import net.vonforst.evmap.databinding.FragmentFavoritesBinding
 import net.vonforst.evmap.databinding.ItemFavoriteBinding
-import net.vonforst.evmap.model.ChargeLocation
+import net.vonforst.evmap.location.FusionEngine
+import net.vonforst.evmap.location.LocationEngine
+import net.vonforst.evmap.model.Favorite
+import net.vonforst.evmap.model.FavoriteWithDetail
 import net.vonforst.evmap.utils.checkAnyLocationPermission
 import net.vonforst.evmap.viewmodel.FavoritesViewModel
 import net.vonforst.evmap.viewmodel.viewModelFactory
 
-class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
+class FavoritesFragment : Fragment() {
     private lateinit var binding: FragmentFavoritesBinding
-    private var locationClient: LostApiClient? = null
-    private var toDelete: ChargeLocation? = null
+    private lateinit var locationEngine: LocationEngine
+    private var toDelete: Favorite? = null
     private var deleteSnackbar: Snackbar? = null
     private lateinit var adapter: FavoritesAdapter
 
@@ -49,8 +52,11 @@ class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        locationClient = LostApiClient.Builder(requireContext())
-            .addConnectionCallbacks(this).build()
+
+        locationEngine = FusionEngine(requireContext())
+
+        enterTransition = MaterialFadeThrough()
+        exitTransition = MaterialFadeThrough()
     }
 
     override fun onCreateView(
@@ -70,9 +76,16 @@ class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // Workaround for AndroidX bug: https://github.com/material-components/material-components-android/issues/1984
+        view.setBackgroundColor(MaterialColors.getColor(view, android.R.attr.windowBackground))
+
+        binding.toolbar.setupWithNavController(
+            findNavController(),
+            (requireActivity() as MapsActivity).appBarConfiguration
+        )
 
         adapter = FavoritesAdapter(onDelete = {
-            delete(it.charger)
+            delete(it.fav)
         }).apply {
             onClickListener = {
                 findNavController().navigate(
@@ -96,42 +109,38 @@ class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
         }
         createTouchHelper().attachToRecyclerView(binding.favsList)
 
-        locationClient!!.connect()
-    }
-
-    override fun onConnected() {
-        val context = this.context ?: return
-        if (context.checkAnyLocationPermission()) {
-            val location = LocationServices.FusedLocationApi.getLastLocation(locationClient!!)
-            if (location != null) {
-                vm.location.value = LatLng(location.latitude, location.longitude)
+        binding.swipeRefresh.setOnRefreshListener {
+            vm.reloadAvailability() {
+                binding.swipeRefresh.isRefreshing = false
             }
         }
     }
 
-    override fun onConnectionSuspended() {
+    override fun onStart() {
+        super.onStart()
 
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        locationClient?.let {
-            if (it.isConnected) it.disconnect()
+        if (requireContext().checkAnyLocationPermission()) {
+            val location = locationEngine.getLastKnownLocation()
+            location?.let {
+                vm.location.value = LatLng(it.latitude, it.longitude)
+            }
         }
     }
 
-    fun delete(fav: ChargeLocation) {
-        val position = vm.listData.value?.indexOfFirst { it.charger == fav } ?: return
+    fun delete(fav: FavoriteWithDetail) {
+        val position =
+            vm.listData.value?.indexOfFirst { it.fav.favorite.favoriteId == fav.favorite.favoriteId }
+                ?: return
         // if there is already a profile to delete, delete it now
         actuallyDelete()
         deleteSnackbar?.dismiss()
 
-        toDelete = fav
+        toDelete = fav.favorite
 
         view?.let {
             val snackbar = Snackbar.make(
                 it,
-                getString(R.string.deleted_filterprofile, fav.name),
+                getString(R.string.deleted_filterprofile, fav.charger.name),
                 Snackbar.LENGTH_LONG
             ).setAction(R.string.undo) {
                 toDelete = null
@@ -170,7 +179,7 @@ class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
             }
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
-                val fav = vm.favorites.value?.find { it.id == viewHolder.itemId }
+                val fav = vm.favorites.value?.find { it.favorite.favoriteId == viewHolder.itemId }
                 fav?.let { delete(it) }
             }
 
@@ -254,9 +263,5 @@ class FavoritesFragment : Fragment(), LostApiClient.ConnectionCallbacks {
 
     override fun onResume() {
         super.onResume()
-        binding.toolbar.setupWithNavController(
-            findNavController(),
-            (requireActivity() as MapsActivity).appBarConfiguration
-        )
     }
 }

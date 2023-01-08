@@ -15,9 +15,12 @@
             android:summary="@string/copyright_summary" />
 
         <Preference
+            android:key="contributors"
+            android:title="@string/about_contributors" />
+
+        <Preference
             android:key="faq"
-            android:title="@string/faq"
-            android:summary="@string/faq_desc" />
+            android:title="@string/faq" />
 
         <Preference
             android:key="donate"

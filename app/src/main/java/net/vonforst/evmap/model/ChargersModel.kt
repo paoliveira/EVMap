@@ -19,11 +19,39 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.*
-import kotlin.math.abs
-import kotlin.math.floor
 
 sealed class ChargepointListItem
 
+
+/**
+ * A whole charging site (potentially with multiple chargepoints).
+ *
+ * @param id A unique number per charging site
+ * @param dataSource The name of the data source
+ * @param coordinates The latitude / longitude of this charge location
+ * @param address The charge location address
+ * @param chargepoints List of chargepoints at this location
+ * @param network The charging network (Mobility Service Provider, MSP)
+ * @param url A link to this charging site
+ * @param editUrl A link to a website where this charging site can be edited
+ * @param faultReport Set this if the charging site is reported to be out of service
+ * @param verified For crowdsourced data sources, this means that the data has been verified
+ *   by an independent person
+ * @param barrierFree Whether this charge location can be used without prior registration
+ * @param operator The operator of this charge location (Charge Point Operator, CPO)
+ * @param generalInformation General information about this charging site that does not fit anywhere else
+ * @param amenities Description of amenities available at or near the charging site (toilets, food, accommodation, landmarks, etc.)
+ * @param locationDescription Directions on how to find the charger (e.g. "In the parking garage on level 5")
+ * @param photos List of photos of this charging site
+ * @param chargecards List of charge cards accepted here
+ * @param openinghours List of times when this charging site can be accessed / used
+ * @param cost The cost for charging and/or parking
+ * @param license How the data about this chargepoint is licensed
+ * @param chargepriceData Additional data needed for the Chargeprice implementation
+ * @param timeRetrieved Time when this information was retrieved from the data source
+ * @param isDetailed Whether this data includes all available details (for many data sources,
+ *                   API calls that return a list may only give a compact representation)
+ */
 @Entity(primaryKeys = ["id", "dataSource"])
 @Parcelize
 data class ChargeLocation(
@@ -31,7 +59,7 @@ data class ChargeLocation(
     val dataSource: String,
     val name: String,
     @Embedded val coordinates: Coordinate,
-    @Embedded val address: Address,
+    @Embedded val address: Address?,
     val chargepoints: List<Chargepoint>,
     val network: String?,
     val url: String,
@@ -49,12 +77,14 @@ data class ChargeLocation(
     @Embedded val openinghours: OpeningHours?,
     @Embedded val cost: Cost?,
     val license: String?,
-    @Embedded(prefix = "chargeprice") val chargepriceData: ChargepriceData?
+    @Embedded(prefix = "chargeprice") val chargepriceData: ChargepriceData?,
+    val timeRetrieved: Instant,
+    val isDetailed: Boolean
 ) : ChargepointListItem(), Equatable, Parcelable {
     /**
      * maximum power available from this charger.
      */
-    val maxPower: Double
+    val maxPower: Double?
         get() {
             return maxPower()
         }
@@ -62,17 +92,20 @@ data class ChargeLocation(
     /**
      * Gets the maximum power available from certain connectors of this charger.
      */
-    fun maxPower(connectors: Set<String>? = null): Double {
-        return chargepoints.filter { connectors?.contains(it.type) ?: true }
-            .map { it.power }.maxOrNull() ?: 0.0
+    fun maxPower(connectors: Set<String>? = null): Double? {
+        return chargepoints
+            .filter { connectors?.contains(it.type) ?: true }
+            .mapNotNull { it.power }
+            .maxOrNull()
     }
 
     fun isMulti(filteredConnectors: Set<String>? = null): Boolean {
         var chargepoints = chargepointsMerged
             .filter { filteredConnectors?.contains(it.type) ?: true }
-        if (maxPower(filteredConnectors) >= 43) {
+        val chargepointMaxPower = maxPower(filteredConnectors)
+        if (chargepointMaxPower != null && chargepointMaxPower >= 43) {
             // fast charger -> only count fast chargers
-            chargepoints = chargepoints.filter { it.power >= 43 }
+            chargepoints = chargepoints.filter {it.power != null && it.power >= 43 }
         }
         val connectors = chargepoints.map { it.type }.distinct().toSet()
 
@@ -132,9 +165,9 @@ data class Cost(
     fun getStatusText(ctx: Context, emoji: Boolean = false): CharSequence {
         if (freecharging != null && freeparking != null) {
             val charging =
-                if (freecharging) ctx.getString(R.string.free) else ctx.getString(R.string.paid)
+                if (freecharging) ctx.getString(R.string.charging_free) else ctx.getString(R.string.charging_paid)
             val parking =
-                if (freeparking) ctx.getString(R.string.free) else ctx.getString(R.string.paid)
+                if (freeparking) ctx.getString(R.string.parking_free) else ctx.getString(R.string.parking_paid)
             return if (emoji) {
                 "⚡ $charging · \uD83C\uDD7F️ $parking"
             } else {
@@ -142,7 +175,7 @@ data class Cost(
             }
         } else if (freecharging != null) {
             val charging =
-                if (freecharging) ctx.getString(R.string.free) else ctx.getString(R.string.paid)
+                if (freecharging) ctx.getString(R.string.charging_free) else ctx.getString(R.string.charging_paid)
             return if (emoji) {
                 "⚡ $charging"
             } else {
@@ -150,7 +183,7 @@ data class Cost(
             }
         } else if (freeparking != null) {
             val parking =
-                if (freeparking) ctx.getString(R.string.free) else ctx.getString(R.string.paid)
+                if (freeparking) ctx.getString(R.string.parking_free) else ctx.getString(R.string.parking_paid)
             return if (emoji) {
                 "\uD83C\uDD7F $parking"
             } else {
@@ -162,6 +195,18 @@ data class Cost(
             return descriptionLong
         } else {
             return ""
+        }
+    }
+
+    fun getDetailText(): CharSequence? {
+        return if (freecharging == null && freeparking == null) {
+            if (descriptionShort != null && descriptionLong != descriptionShort) {
+                descriptionLong
+            } else {
+                null
+            }
+        } else {
+            descriptionLong ?: descriptionShort
         }
     }
 }
@@ -180,26 +225,63 @@ data class OpeningHours(
         if (twentyfourSeven) {
             return HtmlCompat.fromHtml(ctx.getString(R.string.open_247), 0)
         } else if (days != null) {
-            val hours = days.getHoursForDate(LocalDate.now())
-                ?: return HtmlCompat.fromHtml(ctx.getString(R.string.closed), 0)
+            val today = LocalDate.now()
+            val hours = days.getHoursForDate(today)
+            val nextDayHours = days.getHoursForDate(today.plusDays(1))
+            val previousDayHours = days.getHoursForDate(today.minusDays(1))
 
             val now = LocalTime.now()
-            if (hours.start.isBefore(now) && hours.end.isAfter(now)) {
+            val fmt = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
+
+            if (previousDayHours != null && previousDayHours.end.isBefore(previousDayHours.start) && previousDayHours.end.isAfter(
+                    now
+                )
+            ) {
+                // previous day has opening hours that go past midnight
                 return HtmlCompat.fromHtml(
                     ctx.getString(
                         R.string.open_closesat,
-                        hours.end.toString()
+                        previousDayHours.end.format(fmt)
                     ), 0
                 )
-            } else if (hours.end.isBefore(now)) {
-                return HtmlCompat.fromHtml(ctx.getString(R.string.closed), 0)
-            } else {
+            } else if (hours != null && hours.start.isBefore(hours.end)
+                && hours.start.isBefore(now) && hours.end.isAfter(now)
+            ) {
+                // current day has opening hours that do not go past midnight
+                return HtmlCompat.fromHtml(
+                    ctx.getString(
+                        R.string.open_closesat,
+                        hours.end.format(fmt)
+                    ), 0
+                )
+            } else if (hours != null && hours.end.isBefore(hours.start)
+                && hours.start.isBefore(now)
+            ) {
+                // current day has opening hours that go past midnight
+                return HtmlCompat.fromHtml(
+                    ctx.getString(
+                        R.string.open_closesat,
+                        hours.end.format(fmt)
+                    ), 0
+                )
+            } else if (hours != null && !hours.start.isBefore(now)) {
+                // currently closed, will still open on this day
                 return HtmlCompat.fromHtml(
                     ctx.getString(
                         R.string.closed_opensat,
-                        hours.start.toString()
+                        hours.start.format(fmt)
                     ), 0
                 )
+            } else if (nextDayHours != null) {
+                // currently closed, will open next day
+                return HtmlCompat.fromHtml(
+                    ctx.getString(
+                        R.string.closed_opensat,
+                        nextDayHours.start.format(fmt)
+                    ), 0
+                )
+            } else {
+                return HtmlCompat.fromHtml(ctx.getString(R.string.closed), 0)
             }
         } else {
             return ""
@@ -259,28 +341,7 @@ data class ChargeLocationCluster(
 ) : ChargepointListItem()
 
 @Parcelize
-data class Coordinate(val lat: Double, val lng: Double) : Parcelable {
-    fun formatDMS(): String {
-        return "${dms(lat, false)}, ${dms(lng, true)}"
-    }
-
-    private fun dms(value: Double, lon: Boolean): String {
-        val hemisphere = if (lon) {
-            if (value >= 0) "E" else "W"
-        } else {
-            if (value >= 0) "N" else "S"
-        }
-        val d = abs(value)
-        val degrees = floor(d).toInt()
-        val minutes = floor((d - degrees) * 60).toInt()
-        val seconds = ((d - degrees) * 60 - minutes) * 60
-        return "%d°%02d'%02.1f\"%s".format(Locale.ENGLISH, degrees, minutes, seconds, hemisphere)
-    }
-
-    fun formatDecimal(): String {
-        return "%.6f, %.6f".format(Locale.ENGLISH, lat, lng)
-    }
-}
+data class Coordinate(val lat: Double, val lng: Double) : Parcelable
 
 @Parcelize
 data class Address(
@@ -290,15 +351,47 @@ data class Address(
     val street: String?
 ) : Parcelable {
     override fun toString(): String {
-        return "${street ?: ""}, ${postcode ?: ""} ${city ?: ""}"
+        // TODO: the order here follows a German-style format (i.e. street, postcode city).
+        // in principle this should be country-dependent (e.g. UK has postcode after city)
+        return buildString {
+            street?.let {
+                append(it)
+                append(", ")
+            }
+            postcode?.let {
+                append(it)
+                append(" ")
+            }
+            city?.let {
+                append(it)
+            }
+        }
     }
 }
 
+/**
+ * One socket with a certain power, which may be available multiple times at a ChargeLocation.
+ */
 @Parcelize
 @JsonClass(generateAdapter = true)
-data class Chargepoint(val type: String, val power: Double, val count: Int) : Equatable,
-    Parcelable {
-    fun formatPower(): String {
+data class Chargepoint(
+    // The chargepoint type (use one of the constants in the companion object)
+    val type: String,
+    // Power in kW (or null if unknown)
+    val power: Double?,
+    // How many instances of this plug/socket are available?
+    val count: Int,
+) : Equatable, Parcelable {
+    fun hasKnownPower(): Boolean = power != null
+
+    /**
+     * If chargepoint power is defined, format it into a string.
+     * Otherwise, return null.
+     */
+    fun formatPower(): String? {
+        if (power == null) {
+            return null
+        }
         val powerFmt = if (power - power.toInt() == 0.0) {
             "%.0f".format(power)
         } else {

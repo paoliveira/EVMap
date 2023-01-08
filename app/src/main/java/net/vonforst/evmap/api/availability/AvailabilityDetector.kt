@@ -21,6 +21,14 @@ import java.util.concurrent.TimeUnit
 
 interface AvailabilityDetector {
     suspend fun getAvailability(location: ChargeLocation): ChargeLocationStatus
+
+    /**
+     * Get a rough estimate whether this charger is supported by this provider.
+     *
+     * This might be done by checking supported countries, or even by matching the operator
+     * for operator-specific availability detectors.
+     */
+    fun isChargerSupported(charger: ChargeLocation): Boolean
 }
 
 abstract class BaseAvailabilityDetector(private val client: OkHttpClient) : AvailabilityDetector {
@@ -86,7 +94,7 @@ abstract class BaseAvailabilityDetector(private val client: OkHttpClient) : Avai
                 // find corresponding powers in GE data
                 val gePowers =
                     chargepoints.filter { equivalentPlugTypes(it.type).any { it == type } }
-                        .map { it.power }.distinct().sorted()
+                        .mapNotNull { it.power }.distinct().sorted()
 
                 // if the distinct number of powers is the same, try to match.
                 if (powers.size == gePowers.size) {
@@ -124,14 +132,15 @@ abstract class BaseAvailabilityDetector(private val client: OkHttpClient) : Avai
 
 data class ChargeLocationStatus(
     val status: Map<Chargepoint, List<ChargepointStatus>>,
-    val source: String
+    val source: String,
+    val evseIds: Map<Chargepoint, List<String>>? = null
 ) {
     fun applyFilters(connectors: Set<String>?, minPower: Int?): ChargeLocationStatus {
         val statusFiltered = status.filterKeys {
             (connectors == null || connectors.map {
                 equivalentPlugTypes(it)
             }.any { equivalent -> it.type in equivalent })
-                    && (minPower == null || it.power > minPower)
+                    && (minPower == null || (it.power != null && it.power >= minPower))
         }
         return this.copy(status = statusFiltered)
     }
@@ -157,21 +166,16 @@ private val okhttp = OkHttpClient.Builder()
     .cookieJar(JavaNetCookieJar(cookieManager))
     .build()
 val availabilityDetectors = listOf(
+    RheinenergieAvailabilityDetector(okhttp),
+    EnBwAvailabilityDetector(okhttp),
     NewMotionAvailabilityDetector(okhttp)
-    /*ChargecloudAvailabilityDetector(
-        okhttp,
-        "606a0da0dfdd338ee4134605653d4fd8"
-    ), // Maingau
-    ChargecloudAvailabilityDetector(
-        okhttp,
-        "6336fe713f2eb7fa04b97ff6651b76f8"
-    )  // SW Kiel*/
 )
 
 suspend fun getAvailability(charger: ChargeLocation): Resource<ChargeLocationStatus> {
     var value: Resource<ChargeLocationStatus>? = null
     withContext(Dispatchers.IO) {
         for (ad in availabilityDetectors) {
+            if (!ad.isChargerSupported(charger)) continue
             try {
                 value = Resource.success(ad.getAvailability(charger))
                 break

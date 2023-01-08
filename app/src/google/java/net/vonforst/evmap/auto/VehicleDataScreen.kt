@@ -1,37 +1,56 @@
 package net.vonforst.evmap.auto
 
 import android.content.pm.PackageManager
+import android.location.Location
 import android.os.Handler
 import android.os.Looper
 import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.hardware.CarHardwareManager
-import androidx.car.app.hardware.info.EnergyLevel
-import androidx.car.app.hardware.info.Model
-import androidx.car.app.hardware.info.Speed
+import androidx.car.app.hardware.info.*
 import androidx.car.app.model.*
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleObserver
-import androidx.lifecycle.OnLifecycleEvent
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import net.vonforst.evmap.BuildConfig
 import net.vonforst.evmap.R
+import net.vonforst.evmap.ui.CompassNeedle
 import net.vonforst.evmap.ui.Gauge
+import net.vonforst.evmap.utils.formatDecimal
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
-    private val hardwareMan = ctx.getCarService(CarContext.HARDWARE_SERVICE) as CarHardwareManager
+@androidx.car.app.annotations.ExperimentalCarApi
+class VehicleDataScreen(ctx: CarContext, val session: EVMapSession) : Screen(ctx),
+    LocationAwareScreen, DefaultLifecycleObserver {
+    private val carInfo =
+        (ctx.getCarService(CarContext.HARDWARE_SERVICE) as CarHardwareManager).carInfo
+    private val carSensors = carContext.patchedCarSensors
     private var model: Model? = null
     private var energyLevel: EnergyLevel? = null
     private var speed: Speed? = null
+    private var heading: Compass? = null
+    private var location: Location? = null
     private var gauge = Gauge((ctx.resources.displayMetrics.density * 128).roundToInt(), ctx)
+    private var compass =
+        CompassNeedle((ctx.resources.displayMetrics.density * 128).roundToInt(), ctx)
     private val maxSpeed = 160f / 3.6f // m/s, speed gauge will show max if speed is higher
 
-    private val permissions = listOf(
-        "com.google.android.gms.permission.CAR_FUEL",
-        "com.google.android.gms.permission.CAR_SPEED"
-    )
+    private val permissions = if (BuildConfig.FLAVOR_automotive == "automotive") {
+        listOf(
+            "android.car.permission.CAR_INFO",
+            "android.car.permission.CAR_ENERGY",
+            "android.car.permission.CAR_ENERGY_PORTS",
+            "android.car.permission.READ_CAR_DISPLAY_UNITS",
+            "android.car.permission.CAR_SPEED"
+        )
+    } else {
+        listOf(
+            "com.google.android.gms.permission.CAR_FUEL",
+            "com.google.android.gms.permission.CAR_SPEED"
+        )
+    }
 
     init {
         lifecycle.addObserver(this)
@@ -44,7 +63,8 @@ class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
                     PermissionScreen(
                         carContext,
                         R.string.auto_vehicle_data_permission_needed,
-                        permissions
+                        permissions,
+                        finishApp = false
                     )
                 ) {
                     setupListeners()
@@ -55,6 +75,11 @@ class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
         val energyLevel = energyLevel
         val model = model
         val speed = speed
+        val location = location
+
+        val compassHeading = heading?.orientations?.value?.get(0)
+        val gpsHeading = if (location?.hasBearing() == true) location.bearing else null
+        val heading = compassHeading ?: gpsHeading
 
         return GridTemplate.Builder().apply {
             setTitle(
@@ -171,6 +196,38 @@ class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
                                 }
                             }
                         }.build())
+                        addItem(GridItem.Builder().apply {
+                            setTitle(carContext.getString(R.string.auto_heading))
+                            if (heading == null) {
+                                setLoading(true)
+                            } else {
+                                val headingSource =
+                                    if (compassHeading != null) carContext.getString(R.string.compass) else carContext.getString(
+                                        R.string.gps
+                                    )
+                                setText("${heading.roundToInt()}° ($headingSource)")
+                                setImage(
+                                    compass.draw(heading).asCarIcon()
+                                )
+                            }
+                        }.build())
+                        addItem(GridItem.Builder().apply {
+                            setTitle(carContext.getString(R.string.coordinates))
+                            if (location == null) {
+                                setLoading(true)
+                            } else {
+                                val dms = location.formatDecimal(4)
+                                setText(dms)
+                                setImage(
+                                    CarIcon.Builder(
+                                        IconCompat.createWithResource(
+                                            carContext,
+                                            R.drawable.ic_location
+                                        )
+                                    ).setTint(CarColor.DEFAULT).build()
+                                )
+                            }
+                        }.build())
                     }.build()
                 )
             }
@@ -187,27 +244,46 @@ class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
         invalidate()
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
+    private fun onCompassUpdated(compass: Compass) {
+        this.heading = compass
+        invalidate()
+    }
+
+    override fun onResume(owner: LifecycleOwner) {
+        setupListeners()
+        session.mapScreen = this
+    }
+
     private fun setupListeners() {
         if (!permissionsGranted()) return
 
         println("Setting up energy level listener")
 
         val exec = ContextCompat.getMainExecutor(carContext)
-        hardwareMan.carInfo.addEnergyLevelListener(exec, ::onEnergyLevelUpdated)
-        hardwareMan.carInfo.addSpeedListener(exec, ::onSpeedUpdated)
+        carInfo.addEnergyLevelListener(exec, ::onEnergyLevelUpdated)
+        carInfo.addSpeedListener(exec, ::onSpeedUpdated)
+        carSensors.addCompassListener(
+            CarSensors.UPDATE_RATE_NORMAL,
+            exec,
+            ::onCompassUpdated
+        )
 
-        hardwareMan.carInfo.fetchModel(exec) {
+        carInfo.fetchModel(exec) {
             this.model = it
             invalidate()
         }
     }
 
-    @OnLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    override fun onPause(owner: LifecycleOwner) {
+        removeListeners()
+        session.mapScreen = null
+    }
+
     private fun removeListeners() {
         println("Removing energy level listener")
-        hardwareMan.carInfo.removeEnergyLevelListener(::onEnergyLevelUpdated)
-        hardwareMan.carInfo.removeSpeedListener(::onSpeedUpdated)
+        carInfo.removeEnergyLevelListener(::onEnergyLevelUpdated)
+        carInfo.removeSpeedListener(::onSpeedUpdated)
+        carSensors.removeCompassListener(::onCompassUpdated)
     }
 
     private fun permissionsGranted(): Boolean =
@@ -217,4 +293,8 @@ class VehicleDataScreen(ctx: CarContext) : Screen(ctx), LifecycleObserver {
                 it
             ) == PackageManager.PERMISSION_GRANTED
         }
+
+    override fun updateLocation(location: Location) {
+        this.location = location
+    }
 }

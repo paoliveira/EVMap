@@ -19,7 +19,8 @@
     <androidx.coordinatorlayout.widget.CoordinatorLayout
         android:id="@+id/root"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent"
+        android:clipChildren="false">
 
         <FrameLayout
             android:id="@+id/map"
@@ -174,7 +175,7 @@
             app:backgroundTint="?android:colorBackground"
             app:borderWidth="0dp"
             app:isFabActive="@{ vm.myLocationEnabled }"
-            app:layout_behavior="net.vonforst.evmap.ui.HideOnScrollFabBehavior" />
+            app:layout_behavior="@string/hide_on_scroll_fab_behavior" />
 
         <androidx.core.widget.NestedScrollView
             android:id="@+id/bottom_sheet"
@@ -187,6 +188,7 @@
             app:behavior_peekHeight="@dimen/peek_height"
             app:bottomsheetbehavior_defaultState="stateHidden"
             app:layout_behavior="@string/BottomSheetBehaviorGoogleMapsLike"
+            android:clipToPadding="false"
             tools:bottomsheetbehavior_defaultState="stateCollapsed">
 
             <include
@@ -195,10 +197,13 @@
                 app:charger="@{vm.charger}"
                 app:availability="@{vm.availability}"
                 app:filteredAvailability="@{vm.filteredAvailability}"
+                app:predictionGraph="@{vm.predictionGraph}"
+                app:predictionMaxValue="@{vm.predictionMaxValue}"
+                app:predictionDescription="@{vm.predictionDescription}"
                 app:chargeCards="@{vm.chargeCardMap}"
                 app:filteredChargeCards="@{vm.filteredChargeCards}"
                 app:distance="@{vm.chargerDistance}"
-                app:expanded="@{vm.bottomSheetState != BottomSheetBehaviorGoogleMapsLike.STATE_COLLAPSED &amp;&amp; vm.bottomSheetState != BottomSheetBehaviorGoogleMapsLike.STATE_HIDDEN}"
+                app:expanded="@{vm.bottomSheetExpanded}"
                 app:apiName="@{vm.apiName}" />
 
         </androidx.core.widget.NestedScrollView>
@@ -211,6 +216,7 @@
             android:clickable="true"
             android:focusable="true"
             android:src="@drawable/ic_directions"
+            android:translationX="@dimen/directions_fab_translationx"
             app:layout_anchor="@id/bottom_sheet"
             app:layout_anchorGravity="top|right|end"
             app:layout_behavior="@string/ScrollAwareFABBehavior"
@@ -224,6 +230,7 @@
             android:theme="@style/ThemeOverlay.Material3.Dark.ActionBar" />
 
         <com.google.android.material.floatingactionbutton.FloatingActionButton
+            style="@style/Widget.Material3.FloatingActionButton.Small.Surface"
             android:id="@+id/fab_layers"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -233,11 +240,9 @@
             android:layout_marginEnd="20dp"
             android:layout_marginTop="@dimen/layers_fab_top_padding"
             app:tint="?android:colorControlNormal"
-            app:backgroundTint="?android:colorBackground"
             app:borderWidth="0dp"
-            app:fabSize="mini"
             app:srcCompat="@drawable/ic_layers"
-            app:layout_behavior="net.vonforst.evmap.ui.HideOnExpandFabBehavior"
+            app:layout_behavior="@string/hide_on_scroll_fab_behavior"
             android:theme="@style/NoElevationOverlay" />
 
         <androidx.cardview.widget.CardView
@@ -247,7 +252,7 @@
             android:layout_gravity="top|end"
             android:layout_marginEnd="16dp"
             android:layout_marginTop="@dimen/layers_fab_top_padding"
-            android:visibility="gone"
+            android:visibility="invisible"
             app:cardCornerRadius="16dp"
             tools:visibility="visible">
 

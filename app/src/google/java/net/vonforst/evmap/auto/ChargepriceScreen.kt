@@ -1,10 +1,5 @@
 package net.vonforst.evmap.auto
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
-import androidx.browser.customtabs.CustomTabColorSchemeParams
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.car.app.CarContext
 import androidx.car.app.CarToast
 import androidx.car.app.Screen
@@ -15,34 +10,42 @@ import androidx.car.app.model.*
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.lifecycleScope
+import jsonapi.Meta
+import jsonapi.Relationship
+import jsonapi.Relationships
+import jsonapi.ResourceIdentifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import moe.banana.jsonapi2.HasMany
-import moe.banana.jsonapi2.HasOne
-import moe.banana.jsonapi2.JsonBuffer
-import moe.banana.jsonapi2.ResourceIdentifier
-import net.vonforst.evmap.*
+import net.vonforst.evmap.R
 import net.vonforst.evmap.api.chargeprice.*
+import net.vonforst.evmap.api.equivalentPlugTypes
+import net.vonforst.evmap.api.nameForPlugType
+import net.vonforst.evmap.api.stringProvider
 import net.vonforst.evmap.model.ChargeLocation
+import net.vonforst.evmap.model.Chargepoint
 import net.vonforst.evmap.storage.AppDatabase
 import net.vonforst.evmap.storage.PreferenceDataSource
 import net.vonforst.evmap.ui.currency
+import net.vonforst.evmap.ui.time
 import java.io.IOException
+import kotlin.math.roundToInt
 
 class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(ctx) {
     private val prefs = PreferenceDataSource(ctx)
     private val db = AppDatabase.getInstance(carContext)
     private val api by lazy {
-        ChargepriceApi.create(carContext.getString(R.string.chargeprice_key))
+        ChargepriceApi.create(
+            carContext.getString(R.string.chargeprice_key),
+            carContext.getString(R.string.chargeprice_api_url)
+        )
     }
     private var prices: List<ChargePrice>? = null
     private var meta: ChargepriceChargepointMeta? = null
-    private val maxRows = if (ctx.carAppApiLevel >= 2) {
-        ctx.constraintManager.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_LIST)
-    } else 6
+    private var chargepoint: Chargepoint? = null
+    private val maxRows = ctx.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_LIST)
     private var errorMessage: String? = null
-    private val batteryRange = listOf(20.0, 80.0)
+    private val batteryRange = prefs.chargepriceBatteryRangeAndroidAuto
 
     override fun onGetTemplate(): Template {
         if (prices == null) loadData()
@@ -59,17 +62,62 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
             if (prices == null && errorMessage == null) {
                 setLoading(true)
             } else {
-                setSingleList(ItemList.Builder().apply {
-                    setNoItemsMessage(
-                        errorMessage ?: carContext.getString(R.string.chargeprice_no_tariffs_found)
-                    )
-                    prices?.take(maxRows)?.forEach { price ->
-                        addItem(Row.Builder().apply {
-                            setTitle(formatProvider(price))
-                            addText(formatPrice(price))
-                        }.build())
+                val header = meta?.let { meta ->
+                    chargepoint?.let { chargepoint ->
+                        "${
+                            nameForPlugType(
+                                carContext.stringProvider(),
+                                chargepoint.type
+                            )
+                        } ${chargepoint.formatPower()} ${
+                            carContext.getString(
+                                R.string.chargeprice_stats,
+                                meta.energy,
+                                time(meta.duration.roundToInt()),
+                                meta.energy / meta.duration * 60
+                            )
+                        }"
                     }
-                }.build())
+                }
+                val myTariffs = prefs.chargepriceMyTariffs
+                val myTariffsAll = prefs.chargepriceMyTariffsAll
+
+                val prices = prices?.take(maxRows)
+                if (prices != null && prices.isNotEmpty() && !myTariffsAll && myTariffs != null) {
+                    val (myPrices, otherPrices) = prices.partition { price -> price.tariffId in myTariffs }
+                    val myPricesList = buildPricesList(myPrices)
+                    val otherPricesList = buildPricesList(otherPrices)
+                    if (myPricesList.items.isNotEmpty() && otherPricesList.items.isNotEmpty()) {
+                        addSectionedList(
+                            SectionedItemList.create(
+                                myPricesList,
+                                (header?.let { it + "\n" } ?: "") +
+                                        carContext.getString(R.string.chargeprice_header_my_tariffs)
+                            )
+                        )
+                        addSectionedList(
+                            SectionedItemList.create(
+                                otherPricesList,
+                                carContext.getString(R.string.chargeprice_header_other_tariffs)
+                            )
+                        )
+                    } else {
+                        val list =
+                            if (myPricesList.items.isNotEmpty()) myPricesList else otherPricesList
+                        if (header != null) {
+                            addSectionedList(SectionedItemList.create(list, header))
+                        } else {
+                            setSingleList(list)
+                        }
+                    }
+                } else {
+                    val list = buildPricesList(prices)
+                    if (header != null && list.items.isNotEmpty()) {
+                        addSectionedList(SectionedItemList.create(list, header))
+                    } else {
+                        setSingleList(list)
+                    }
+                }
             }
             setActionStrip(
                 ActionStrip.Builder().addAction(
@@ -81,38 +129,25 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
                             )
                         ).build()
                     ).setOnClickListener {
-                        val intent = CustomTabsIntent.Builder()
-                            .setDefaultColorSchemeParams(
-                                CustomTabColorSchemeParams.Builder()
-                                    .setToolbarColor(
-                                        ContextCompat.getColor(
-                                            carContext,
-                                            R.color.colorPrimary
-                                        )
-                                    )
-                                    .build()
-                            )
-                            .build().intent
-                        intent.data =
-                            Uri.parse("https://www.chargeprice.app/?poi_id=${charger.id}&poi_source=${getDataAdapter()}")
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        try {
-                            carContext.startActivity(intent)
-                            CarToast.makeText(
-                                carContext,
-                                R.string.opened_on_phone,
-                                CarToast.LENGTH_LONG
-                            ).show()
-                        } catch (e: ActivityNotFoundException) {
-                            CarToast.makeText(
-                                carContext,
-                                R.string.no_browser_app_found,
-                                CarToast.LENGTH_LONG
-                            ).show()
-                        }
+                        openUrl(carContext, ChargepriceApi.getPoiUrl(charger))
                     }.build()
                 ).build()
             )
+        }.build()
+    }
+
+    private fun buildPricesList(prices: List<ChargePrice>?): ItemList {
+        return ItemList.Builder().apply {
+            setNoItemsMessage(
+                errorMessage
+                    ?: carContext.getString(R.string.chargeprice_no_tariffs_found)
+            )
+            prices?.forEach { price ->
+                addItem(Row.Builder().apply {
+                    setTitle(formatProvider(price))
+                    addText(formatPrice(price))
+                }.build())
+            }
         }.build()
     }
 
@@ -125,19 +160,21 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
     }
 
     private fun formatPrice(price: ChargePrice): String {
+        val amount = price.chargepointPrices.first().price
+            ?: return "${carContext.getString(R.string.chargeprice_price_not_available)} (${price.chargepointPrices.first().noPriceReason})"
         val totalPrice = carContext.getString(
             R.string.charge_price_format,
-            price.chargepointPrices.first().price,
+            amount,
             currency(price.currency)
         )
-        val kwhPrice = if (price.chargepointPrices.first().price > 0f) {
+        val kwhPrice = if (amount > 0f) {
             carContext.getString(
                 if (price.chargepointPrices[0].priceDistribution.isOnlyKwh) {
                     R.string.charge_price_kwh_format
                 } else {
                     R.string.charge_price_average_format
                 },
-                price.chargepointPrices.get(0).price / meta!!.energy,
+                amount / meta!!.energy,
                 currency(price.currency)
             )
         } else null
@@ -169,59 +206,76 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
     }
 
     private fun loadPrices(model: Model?) {
-        val dataAdapter = getDataAdapter() ?: return
+        val dataAdapter = ChargepriceApi.getDataAdapter(charger) ?: return
         val manufacturer = model?.manufacturer?.value
         val modelName = getVehicleModel(model?.manufacturer?.value, model?.name?.value)
         lifecycleScope.launch {
             try {
                 val car = determineVehicle(manufacturer, modelName)
                 val cpStation = ChargepriceStation.fromEvmap(charger, car.compatibleEvmapConnectors)
-                val result = api.getChargePrices(ChargepriceRequest().apply {
-                    this.dataAdapter = dataAdapter
-                    station = cpStation
-                    vehicle = HasOne(car)
-                    tariffs = if (!prefs.chargepriceMyTariffsAll) {
-                        val myTariffs = prefs.chargepriceMyTariffs ?: emptySet()
-                        HasMany<ChargepriceTariff>(*myTariffs.map {
-                            ResourceIdentifier(
-                                "tariff",
-                                it
+
+                if (cpStation.chargePoints.isEmpty()) {
+                    errorMessage =
+                        carContext.getString(R.string.chargeprice_no_compatible_connectors)
+                    invalidate()
+                    return@launch
+                }
+
+                val result = api.getChargePrices(
+                    ChargepriceRequest(
+                        dataAdapter = dataAdapter,
+                        station = cpStation,
+                        vehicle = car,
+                        options = ChargepriceOptions(
+                            batteryRange = batteryRange.map { it.toDouble() },
+                            providerCustomerTariffs = prefs.chargepriceShowProviderCustomerTariffs,
+                            maxMonthlyFees = if (prefs.chargepriceNoBaseFee) 0.0 else null,
+                            currency = prefs.chargepriceCurrency,
+                            allowUnbalancedLoad = prefs.chargepriceAllowUnbalancedLoad,
+                            showPriceUnavailable = true
+                        ),
+                        relationships = if (!prefs.chargepriceMyTariffsAll) {
+                            val myTariffs = prefs.chargepriceMyTariffs ?: emptySet()
+                            Relationships(
+                                "tariffs" to Relationship.ToMany(
+                                    myTariffs.map {
+                                        ResourceIdentifier(
+                                            "tariff",
+                                            id = it
+                                        )
+                                    },
+                                    meta = Meta.from(
+                                        ChargepriceRequestTariffMeta(ChargepriceInclude.ALWAYS),
+                                        ChargepriceApi.moshi
+                                    )
+                                )
                             )
-                        }.toTypedArray()).apply {
-                            meta = JsonBuffer.create(
-                                ChargepriceApi.moshi.adapter(ChargepriceRequestTariffMeta::class.java),
-                                ChargepriceRequestTariffMeta(ChargepriceInclude.ALWAYS)
-                            )
-                        }
-                    } else null
-                    options = ChargepriceOptions(
-                        batteryRange = batteryRange,
-                        providerCustomerTariffs = prefs.chargepriceShowProviderCustomerTariffs,
-                        maxMonthlyFees = if (prefs.chargepriceNoBaseFee) 0.0 else null,
-                        currency = prefs.chargepriceCurrency
-                    )
-                }, ChargepriceApi.getChargepriceLanguage())
+                        } else null
+                    ), ChargepriceApi.getChargepriceLanguage()
+                )
 
                 val myTariffs = prefs.chargepriceMyTariffs
 
-                // choose the highest power chargepoint compatible with the car
-                val chargepoint = cpStation.chargePoints.filterIndexed { i, cp ->
-                    charger.chargepointsMerged[i].type in car.compatibleEvmapConnectors
-                }.maxByOrNull { it.power }
+                // choose the highest power chargepoint
+                // (we have already filtered so that only compatible ones are included)
+                val chargepoint = cpStation.chargePoints.maxByOrNull { it.power }
+
+                val index = cpStation.chargePoints.indexOf(chargepoint)
+                this@ChargepriceScreen.chargepoint =
+                    charger.chargepoints.filter { equivalentPlugTypes(it.type).any { it in car.compatibleEvmapConnectors } }[index]
+
                 if (chargepoint == null) {
                     errorMessage =
                         carContext.getString(R.string.chargeprice_no_compatible_connectors)
                     invalidate()
                     return@launch
                 }
-                meta =
-                    (result.meta.get<ChargepriceMeta>(ChargepriceApi.moshi.adapter(ChargepriceMeta::class.java)) as ChargepriceMeta).chargePoints.filterIndexed { i, cp ->
-                        charger.chargepointsMerged[i].type in car.compatibleEvmapConnectors
-                    }.maxByOrNull {
-                        it.power
-                    }
 
-                prices = result.map { cp ->
+                val metaMapped =
+                    result.meta!!.map(ChargepriceMeta::class.java, ChargepriceApi.moshi)!!
+                meta = metaMapped.chargePoints.maxByOrNull { it.power }
+
+                prices = result.data!!.map { cp ->
                     val filteredPrices =
                         cp.chargepointPrices.filter {
                             it.plug == chargepoint.plug && it.power == chargepoint.power
@@ -229,15 +283,15 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
                     if (filteredPrices.isEmpty()) {
                         null
                     } else {
-                        cp.clone().apply {
+                        cp.copy(
                             chargepointPrices = filteredPrices
-                        }
+                        )
                     }
                 }.filterNotNull()
-                    .sortedBy { it.chargepointPrices.first().price }
+                    .sortedBy { it.chargepointPrices.first().price ?: Double.MAX_VALUE }
                     .sortedByDescending {
                         prefs.chargepriceMyTariffsAll ||
-                                myTariffs != null && it.tariff?.get()?.id in myTariffs
+                                myTariffs != null && it.tariffId in myTariffs
                     }
                 invalidate()
             } catch (e: IOException) {
@@ -314,11 +368,5 @@ class ChargepriceScreen(ctx: CarContext, val charger: ChargeLocation) : Screen(c
             }
         }
         return vehicles[0]
-    }
-
-    private fun getDataAdapter(): String? = when (charger.dataSource) {
-        "goingelectric" -> ChargepriceApi.DATA_SOURCE_GOINGELECTRIC
-        "openchargemap" -> ChargepriceApi.DATA_SOURCE_OPENCHARGEMAP
-        else -> null
     }
 }

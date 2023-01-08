@@ -4,11 +4,9 @@ import android.Manifest.permission.ACCESS_COARSE_LOCATION
 import android.Manifest.permission.ACCESS_FINE_LOCATION
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.location.Geocoder
-import android.location.Location
 import android.os.Bundle
 import android.text.method.KeyListener
 import android.view.*
@@ -18,11 +16,11 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationListenerCompat
 import androidx.core.view.*
 import androidx.databinding.DataBindingUtil
 import androidx.fragment.app.Fragment
@@ -32,6 +30,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.Observer
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.findNavController
+import androidx.navigation.fragment.FragmentNavigatorExtras
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
 import androidx.navigation.ui.setupWithNavController
@@ -50,55 +49,57 @@ import com.car2go.maps.model.BitmapDescriptor
 import com.car2go.maps.model.LatLng
 import com.car2go.maps.model.Marker
 import com.car2go.maps.model.MarkerOptions
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.transition.MaterialArcMotion
 import com.google.android.material.transition.MaterialContainerTransform
+import com.google.android.material.transition.MaterialFadeThrough
+import com.google.android.material.transition.MaterialSharedAxis
 import com.mahc.custombottomsheetbehavior.BottomSheetBehaviorGoogleMapsLike
-import com.mahc.custombottomsheetbehavior.BottomSheetBehaviorGoogleMapsLike.STATE_COLLAPSED
-import com.mahc.custombottomsheetbehavior.BottomSheetBehaviorGoogleMapsLike.STATE_HIDDEN
+import com.mahc.custombottomsheetbehavior.BottomSheetBehaviorGoogleMapsLike.*
 import com.mahc.custombottomsheetbehavior.MergedAppBarLayoutBehavior
-import com.mapzen.android.lost.api.LocationListener
-import com.mapzen.android.lost.api.LocationRequest
-import com.mapzen.android.lost.api.LocationServices
-import com.mapzen.android.lost.api.LostApiClient
 import com.stfalcon.imageviewer.StfalconImageViewer
 import io.michaelrocks.bimap.HashBiMap
 import io.michaelrocks.bimap.MutableBiMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import net.vonforst.evmap.*
+import net.vonforst.evmap.BuildConfig
+import net.vonforst.evmap.MapsActivity
+import net.vonforst.evmap.R
 import net.vonforst.evmap.adapter.ConnectorAdapter
 import net.vonforst.evmap.adapter.DetailsAdapter
 import net.vonforst.evmap.adapter.GalleryAdapter
 import net.vonforst.evmap.adapter.PlaceAutocompleteAdapter
-import net.vonforst.evmap.api.goingelectric.GoingElectricApiWrapper
-import net.vonforst.evmap.api.openchargemap.OpenChargeMapApiWrapper
 import net.vonforst.evmap.autocomplete.ApiUnavailableException
 import net.vonforst.evmap.autocomplete.PlaceWithBounds
+import net.vonforst.evmap.bold
 import net.vonforst.evmap.databinding.FragmentMapBinding
+import net.vonforst.evmap.location.FusionEngine
+import net.vonforst.evmap.location.LocationEngine
+import net.vonforst.evmap.location.Priority
 import net.vonforst.evmap.model.*
 import net.vonforst.evmap.storage.PreferenceDataSource
-import net.vonforst.evmap.ui.ChargerIconGenerator
-import net.vonforst.evmap.ui.ClusterIconGenerator
-import net.vonforst.evmap.ui.MarkerAnimator
-import net.vonforst.evmap.ui.getMarkerTint
+import net.vonforst.evmap.ui.*
 import net.vonforst.evmap.utils.boundingBox
 import net.vonforst.evmap.utils.checkAnyLocationPermission
 import net.vonforst.evmap.utils.checkFineLocationPermission
 import net.vonforst.evmap.utils.distanceBetween
 import net.vonforst.evmap.viewmodel.*
 import java.io.IOException
+import kotlin.collections.component1
+import kotlin.collections.component2
+import kotlin.collections.contains
+import kotlin.collections.set
 
 
-class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallback,
-    LostApiClient.ConnectionCallbacks, LocationListener {
+class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallback, MenuProvider {
     private lateinit var binding: FragmentMapBinding
     private val vm: MapViewModel by viewModels()
     private val galleryVm: GalleryViewModel by activityViewModels()
     private var mapFragment: MapFragment? = null
     private var map: AnyMap? = null
-    private lateinit var locationClient: LostApiClient
+    private lateinit var locationEngine: LocationEngine
     private var requestingLocationUpdates = false
     private lateinit var bottomSheetBehavior: BottomSheetBehaviorGoogleMapsLike<View>
     private lateinit var detailAppBarBehavior: MergedAppBarLayoutBehavior
@@ -109,6 +110,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
     private var searchResultIcon: BitmapDescriptor? = null
     private var connectionErrorSnackbar: Snackbar? = null
     private var previousChargepointIds: Set<Long>? = null
+    private var mapTopPadding: Int = 0
 
     private lateinit var clusterIconGenerator: ClusterIconGenerator
     private lateinit var chargerIconGenerator: ChargerIconGenerator
@@ -128,7 +130,11 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
             val state = bottomSheetBehavior.state
             if (state != STATE_COLLAPSED && state != STATE_HIDDEN) {
-                bottomSheetBehavior.state = STATE_COLLAPSED
+                if (bottomSheetCollapsible) {
+                    bottomSheetBehavior.state = STATE_COLLAPSED
+                } else {
+                    vm.chargerSparse.value = null
+                }
             } else if (state == STATE_COLLAPSED) {
                 vm.chargerSparse.value = null
             } else if (state == STATE_HIDDEN) {
@@ -142,12 +148,14 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
         prefs = PreferenceDataSource(requireContext())
 
-        locationClient = LostApiClient.Builder(requireContext())
-            .addConnectionCallbacks(this)
-            .build()
-        locationClient.connect()
+        locationEngine = FusionEngine(requireContext())
         clusterIconGenerator = ClusterIconGenerator(requireContext())
+
+        enterTransition = MaterialFadeThrough()
+        exitTransition = MaterialFadeThrough()
     }
+
+    private val mapFragmentTag = "map"
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -159,6 +167,10 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         binding.vm = vm
 
         val provider = prefs.mapProvider
+        if (mapFragment == null) {
+            mapFragment =
+                childFragmentManager.findFragmentByTag(mapFragmentTag) as MapFragment?
+        }
         if (mapFragment == null || mapFragment!!.priority[0] != provider) {
             mapFragment = MapFragment()
             mapFragment!!.priority = arrayOf(
@@ -170,9 +182,9 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 MapFragment.GOOGLE,
                 MapFragment.MAPBOX
             )
-            requireActivity().supportFragmentManager
+            childFragmentManager
                 .beginTransaction()
-                .replace(R.id.map, mapFragment!!)
+                .replace(R.id.map, mapFragment!!, mapFragmentTag)
                 .commit()
 
             // reset map-related stuff (map provider may have changed)
@@ -183,21 +195,23 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
             searchResultIcon = null
         }
 
-        setHasOptionsMenu(true)
+        ViewCompat.setOnApplyWindowInsetsListener(
+            binding.root
+        ) { v, insets ->
+            ViewCompat.onApplyWindowInsets(binding.root, insets)
 
-        binding.root.setOnApplyWindowInsetsListener { _, insets ->
+            val systemWindowInsetTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             binding.detailAppBar.toolbar.updateLayoutParams<ViewGroup.MarginLayoutParams> {
-                topMargin = insets.systemWindowInsetTop
+                topMargin = systemWindowInsetTop
             }
 
-            // margin of layers button
+            // margin of layers button: status bar height + toolbar height + margin
             val density = resources.displayMetrics.density
-            // status bar height + toolbar height + margin
             val margin =
                 if (binding.toolbarContainer.layoutParams.width == ViewGroup.LayoutParams.MATCH_PARENT) {
-                    insets.systemWindowInsetTop + (48 * density).toInt() + (28 * density).toInt()
+                    systemWindowInsetTop + (48 * density).toInt() + (28 * density).toInt()
                 } else {
-                    insets.systemWindowInsetTop + (12 * density).toInt()
+                    systemWindowInsetTop + (12 * density).toInt()
                 }
             binding.fabLayers.updateLayoutParams<ViewGroup.MarginLayoutParams> {
                 topMargin = margin
@@ -205,6 +219,13 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
             binding.layersSheet.updateLayoutParams<ViewGroup.MarginLayoutParams> {
                 topMargin = margin
             }
+
+            // set map padding so that compass is not obstructed by toolbar
+            mapTopPadding = systemWindowInsetTop + (48 * density).toInt() + (16 * density).toInt()
+            // if we actually use map.setPadding here, Mapbox will re-trigger onApplyWindowInsets
+            // and cause an infinite loop. So we rely on onMapReady being called later than
+            // onApplyWindowInsets.
+
             insets
         }
 
@@ -219,7 +240,12 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         return binding.root
     }
 
+    val bottomSheetCollapsible
+        get() = resources.getBoolean(R.bool.bottom_sheet_collapsible)
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        requireActivity().addMenuProvider(this, viewLifecycleOwner, Lifecycle.State.RESUMED)
+
         mapFragment!!.getMapAsync(this)
         bottomSheetBehavior = BottomSheetBehaviorGoogleMapsLike.from(binding.bottomSheet)
         detailAppBarBehavior = MergedAppBarLayoutBehavior.from(binding.detailAppBar)
@@ -232,11 +258,17 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         binding.detailView.topPart.doOnNextLayout {
             bottomSheetBehavior.peekHeight = binding.detailView.topPart.bottom
         }
+        bottomSheetBehavior.isCollapsible = bottomSheetCollapsible
 
         setupObservers()
         setupClickListeners()
         setupAdapters()
         (activity as? MapsActivity)?.setSupportActionBar(binding.toolbar)
+
+        binding.toolbar.setupWithNavController(
+            findNavController(),
+            (requireActivity() as MapsActivity).appBarConfiguration
+        )
 
         if (prefs.appStartCounter > 5 && !prefs.opensourceDonationsDialogShown) {
             try {
@@ -287,27 +319,27 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         val hostActivity = activity as? MapsActivity ?: return
         hostActivity.fragmentCallback = this
 
-        val navController = findNavController()
-        binding.toolbar.setupWithNavController(
-            navController,
-            (requireActivity() as MapsActivity).appBarConfiguration
-        )
-
         vm.reloadPrefs()
         if (requestingLocationUpdates && requireContext().checkAnyLocationPermission()
-            && locationClient.isConnected
         ) {
             requestLocationUpdates()
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            val context = context ?: return@registerForActivityResult
+            if (context.checkAnyLocationPermission()) {
+                enableLocation(moveTo = true, animate = true)
+            }
+        }
+
     private fun setupClickListeners() {
         binding.fabLocate.setOnClickListener {
             if (!requireContext().checkFineLocationPermission()) {
-                ActivityCompat.requestPermissions(
-                    requireActivity(),
-                    arrayOf(ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION),
-                    REQUEST_LOCATION_PERMISSION
+                requestPermissionLauncher.launch(
+                    arrayOf(ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION)
                 )
             }
             if (requireContext().checkAnyLocationPermission()) {
@@ -336,22 +368,33 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         }
         binding.detailView.btnChargeprice.setOnClickListener {
             val charger = vm.charger.value?.data ?: return@setOnClickListener
-            val dataSource = when (vm.apiType) {
-                GoingElectricApiWrapper::class.java -> "going_electric"
-                OpenChargeMapApiWrapper::class.java -> "open_charge_map"
-                else -> throw IllegalArgumentException("unsupported data source")
-            }
+            val extras =
+                FragmentNavigatorExtras(binding.detailView.btnChargeprice to getString(R.string.shared_element_chargeprice))
             findNavController().navigate(
                 R.id.action_map_to_chargepriceFragment,
-                ChargepriceFragmentArgs(charger, dataSource).toBundle()
+                ChargepriceFragmentArgs(charger).toBundle(),
+                null, extras
             )
+        }
+        binding.detailView.imgPredictionSource.setOnClickListener {
+            (activity as? MapsActivity)?.openUrl(getString(R.string.fronyx_url))
+        }
+        binding.detailView.btnPredictionHelp.setOnClickListener {
+            MaterialAlertDialogBuilder(requireContext())
+                .setMessage(getString(R.string.prediction_help))
+                .setPositiveButton(R.string.ok) { _, _ -> }
+                .show()
         }
         binding.detailView.topPart.setOnClickListener {
             bottomSheetBehavior.state = BottomSheetBehaviorGoogleMapsLike.STATE_ANCHOR_POINT
         }
         setupSearchAutocomplete()
         binding.detailAppBar.toolbar.setNavigationOnClickListener {
-            bottomSheetBehavior.state = STATE_COLLAPSED
+            if (bottomSheetCollapsible) {
+                bottomSheetBehavior.state = STATE_COLLAPSED
+            } else {
+                vm.chargerSparse.value = null
+            }
         }
         binding.detailAppBar.toolbar.setOnMenuItemClickListener {
             when (it.itemId) {
@@ -370,7 +413,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                     val charger = vm.charger.value?.data
                     if (charger?.editUrl != null) {
                         (activity as? MapsActivity)?.openUrl(charger.editUrl)
-                        if (vm.apiType == GoingElectricApiWrapper::class.java) {
+                        if (vm.apiId.value == "going_electric") {
                             // instructions specific to GoingElectric
                             Toast.makeText(
                                 requireContext(),
@@ -383,6 +426,9 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 }
                 else -> false
             }
+        }
+        binding.detailView.btnRefreshLiveData.setOnClickListener {
+            vm.reloadAvailability()
         }
     }
 
@@ -422,6 +468,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         binding.search.onFocusChangeListener = View.OnFocusChangeListener { v, hasFocus ->
             if (hasFocus) {
                 binding.search.keyListener = searchKeyListener
+                binding.search.text = binding.search.text  // workaround to fix copy/paste
             } else {
                 binding.search.keyListener = null
             }
@@ -447,36 +494,46 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
     private fun openLayersMenu() {
         binding.fabLayers.tag = false
-        val materialTransform = MaterialContainerTransform().apply {
-            startView = binding.fabLayers
-            endView = binding.layersSheet
-            setPathMotion(MaterialArcMotion())
-            duration = 250
-            scrimColor = Color.TRANSPARENT
-        }
-        TransitionManager.beginDelayedTransition(binding.root, materialTransform)
-        vm.layersMenuOpen.value = true
+
+        binding.fabLayers.postDelayed({
+            val materialTransform = MaterialContainerTransform().apply {
+                startView = binding.fabLayers
+                endView = binding.layersSheet
+                setPathMotion(MaterialArcMotion())
+                duration = 250
+                scrimColor = Color.TRANSPARENT
+                addTarget(binding.layersSheet)
+                isElevationShadowEnabled = false
+            }
+            TransitionManager.beginDelayedTransition(binding.root, materialTransform)
+            vm.layersMenuOpen.value = true
+        }, 100)
     }
 
     private fun closeLayersMenu() {
         binding.fabLayers.tag = true
-        val materialTransform = MaterialContainerTransform().apply {
-            startView = binding.layersSheet
-            endView = binding.fabLayers
-            setPathMotion(MaterialArcMotion())
-            duration = 200
-            scrimColor = Color.TRANSPARENT
-        }
-        TransitionManager.beginDelayedTransition(binding.root, materialTransform)
-        vm.layersMenuOpen.value = false
+
+        binding.fabLayers.postDelayed({
+            val materialTransform = MaterialContainerTransform().apply {
+                startView = binding.layersSheet
+                endView = binding.fabLayers
+                setPathMotion(MaterialArcMotion())
+                duration = 200
+                scrimColor = Color.TRANSPARENT
+                addTarget(binding.fabLayers)
+                isElevationShadowEnabled = false
+            }
+            TransitionManager.beginDelayedTransition(binding.root, materialTransform)
+            vm.layersMenuOpen.value = false
+        }, 100)
     }
 
     private fun toggleFavorite() {
         val favs = vm.favorites.value ?: return
         val charger = vm.chargerSparse.value ?: return
-        val isFav = favs.find { it.id == charger.id } != null
-        if (isFav) {
-            vm.deleteFavorite(charger)
+        val fav = favs.find { it.charger.id == charger.id }
+        if (fav != null) {
+            vm.deleteFavorite(fav.favorite)
         } else {
             vm.insertFavorite(charger)
         }
@@ -486,7 +543,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 highlight = true,
                 fault = charger.faultReport != null,
                 multi = charger.isMulti(vm.filteredConnectors.value),
-                fav = !isFav
+                fav = fav == null,
+                mini = vm.useMiniMarkers.value == true
             )
         )
     }
@@ -515,7 +573,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         vm.chargerSparse.observe(viewLifecycleOwner, Observer {
             if (it != null) {
                 if (vm.bottomSheetState.value != BottomSheetBehaviorGoogleMapsLike.STATE_ANCHOR_POINT) {
-                    bottomSheetBehavior.state = STATE_COLLAPSED
+                    bottomSheetBehavior.state =
+                        if (bottomSheetCollapsible) STATE_COLLAPSED else STATE_ANCHOR_POINT
                 }
                 removeSearchFocus()
                 binding.fabDirections.show()
@@ -553,42 +612,18 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 updateMap(chargepoints)
             }
         })
+        vm.useMiniMarkers.observe(viewLifecycleOwner) {
+            vm.chargepoints.value?.data?.let { updateMap(it) }
+        }
         vm.favorites.observe(viewLifecycleOwner, Observer {
             updateFavoriteToggle()
         })
         vm.searchResult.observe(viewLifecycleOwner, Observer { place ->
-            val map = this.map ?: return@Observer
-            searchResultMarker?.remove()
-            searchResultMarker = null
-
-            if (place != null) {
-                // disable location following when search result is shown
-                vm.myLocationEnabled.value = false
-                if (place.viewport != null) {
-                    map.animateCamera(map.cameraUpdateFactory.newLatLngBounds(place.viewport, 0))
-                } else {
-                    map.animateCamera(map.cameraUpdateFactory.newLatLngZoom(place.latLng, 12f))
-                }
-
-                if (searchResultIcon == null) {
-                    searchResultIcon =
-                        map.bitmapDescriptorFactory.fromResource(R.drawable.ic_map_marker)
-                }
-                searchResultMarker = map.addMarker(
-                    MarkerOptions()
-                        .position(place.latLng)
-                        .icon(searchResultIcon)
-                        .anchor(0.5f, 1f)
-                )
-            } else {
-                binding.search.setText("")
-            }
-
-            updateBackPressedCallback()
+            displaySearchResult(place, moveCamera = true)
         })
         vm.layersMenuOpen.observe(viewLifecycleOwner, Observer { open ->
-            binding.fabLayers.visibility = if (open) View.GONE else View.VISIBLE
-            binding.layersSheet.visibility = if (open) View.VISIBLE else View.GONE
+            binding.fabLayers.visibility = if (open) View.INVISIBLE else View.VISIBLE
+            binding.layersSheet.visibility = if (open) View.VISIBLE else View.INVISIBLE
             updateBackPressedCallback()
         })
         vm.mapType.observe(viewLifecycleOwner, Observer {
@@ -597,6 +632,40 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         vm.mapTrafficEnabled.observe(viewLifecycleOwner, Observer {
             map?.setTrafficEnabled(it)
         })
+
+        updateBackPressedCallback()
+    }
+
+    private fun displaySearchResult(place: PlaceWithBounds?, moveCamera: Boolean) {
+        val map = this.map ?: return
+        searchResultMarker?.remove()
+        searchResultMarker = null
+
+        if (place != null) {
+            // disable location following when search result is shown
+            if (moveCamera) {
+                vm.myLocationEnabled.value = false
+                if (place.viewport != null) {
+                    map.animateCamera(map.cameraUpdateFactory.newLatLngBounds(place.viewport, 0))
+                } else {
+                    map.animateCamera(map.cameraUpdateFactory.newLatLngZoom(place.latLng, 12f))
+                }
+            }
+
+            if (searchResultIcon == null) {
+                searchResultIcon =
+                    map.bitmapDescriptorFactory.fromResource(R.drawable.ic_map_marker)
+            }
+            searchResultMarker = map.addMarker(
+                MarkerOptions()
+                    .z(placeSearchZ)
+                    .position(place.latLng)
+                    .icon(searchResultIcon)
+                    .anchor(0.5f, 1f)
+            )
+        } else {
+            binding.search.setText("")
+        }
 
         updateBackPressedCallback()
     }
@@ -617,7 +686,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                     highlight = false,
                     fault = c.faultReport != null,
                     multi = c.isMulti(vm.filteredConnectors.value),
-                    fav = c.id in vm.favorites.value?.map { it.id } ?: emptyList()
+                    fav = c.id in vm.favorites.value?.map { it.charger.id } ?: emptyList(),
+                    mini = vm.useMiniMarkers.value == true
                 )
             )
         }
@@ -632,10 +702,11 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 highlight = true,
                 fault = charger.faultReport != null,
                 multi = charger.isMulti(vm.filteredConnectors.value),
-                fav = charger.id in vm.favorites.value?.map { it.id } ?: emptyList()
+                fav = charger.id in vm.favorites.value?.map { it.charger.id } ?: emptyList(),
+                mini = vm.useMiniMarkers.value == true
             )
         )
-        animator.animateMarkerBounce(marker)
+        animator.animateMarkerBounce(marker, vm.useMiniMarkers.value == true)
 
         // un-highlight all other markers
         markers.forEach { (m, c) ->
@@ -646,7 +717,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                         highlight = false,
                         fault = c.faultReport != null,
                         multi = c.isMulti(vm.filteredConnectors.value),
-                        fav = c.id in vm.favorites.value?.map { it.id } ?: emptyList()
+                        fav = c.id in vm.favorites.value?.map { it.charger.id } ?: emptyList(),
+                        mini = vm.useMiniMarkers.value == true
                     )
                 )
             }
@@ -656,7 +728,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
     private fun updateFavoriteToggle() {
         val favs = vm.favorites.value ?: return
         val charger = vm.chargerSparse.value ?: return
-        if (favs.find { it.id == charger.id } != null) {
+        if (favs.find { it.charger.id == charger.id } != null) {
             favToggle.setIcon(R.drawable.ic_fav)
         } else {
             favToggle.setIcon(R.drawable.ic_fav_no)
@@ -686,6 +758,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                         }
                     }
                     .withStartPosition(position)
+                    .withHiddenStatusBar(false)
                     .show()
 
             }
@@ -758,7 +831,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 it.name
             }
         }
-        AlertDialog.Builder(activity)
+        MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.charge_cards)
             .setItems(names.toTypedArray()) { _, i ->
                 val card = data[i]
@@ -768,9 +841,10 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
     override fun onMapReady(map: AnyMap) {
         this.map = map
-        chargerIconGenerator = ChargerIconGenerator(requireContext(), map.bitmapDescriptorFactory)
+        val context = this.context ?: return
+        chargerIconGenerator = ChargerIconGenerator(context, map.bitmapDescriptorFactory)
 
-        if (BuildConfig.FLAVOR == "google" && mapFragment!!.priority[0] == MapFragment.GOOGLE) {
+        if (BuildConfig.FLAVOR.contains("google") && mapFragment!!.priority[0] == MapFragment.GOOGLE) {
             // Google Maps: icons can be generated in background thread
             lifecycleScope.launch {
                 withContext(Dispatchers.IO) {
@@ -786,17 +860,25 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
         animator = MarkerAnimator(chargerIconGenerator)
         map.uiSettings.setTiltGesturesEnabled(false)
+        map.uiSettings.setRotateGesturesEnabled(prefs.mapRotateGesturesEnabled)
         map.setIndoorEnabled(false)
         map.uiSettings.setIndoorLevelPickerEnabled(false)
+
         map.setOnCameraIdleListener {
             vm.mapPosition.value = MapPosition(
                 map.projection.visibleRegion.latLngBounds, map.cameraPosition.zoom
             )
-            binding.scaleView.update(map.cameraPosition.zoom, map.cameraPosition.target.latitude)
+            vm.reloadChargepoints()
         }
         map.setOnCameraMoveListener {
+            vm.mapPosition.value = MapPosition(
+                map.projection.visibleRegion.latLngBounds, map.cameraPosition.zoom
+            )
+        }
+        vm.mapPosition.observe(viewLifecycleOwner) {
             binding.scaleView.update(map.cameraPosition.zoom, map.cameraPosition.target.latitude)
         }
+
         map.setOnCameraMoveStartedListener { reason ->
             if (reason == AnyMap.OnCameraMoveStartedListener.REASON_GESTURE) {
                 if (vm.myLocationEnabled.value == true) {
@@ -839,7 +921,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         map.setTrafficEnabled(vm.mapTrafficEnabled.value ?: false)
 
         // set padding so that compass is not obstructed by toolbar
-        map.setPadding(0, binding.toolbarContainer.height, 0, 0)
+        map.setPadding(0, mapTopPadding, 0, 0)
 
         val mode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         map.setMapStyle(
@@ -907,7 +989,12 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         } else if (locationName != null) {
             lifecycleScope.launch {
                 val address = withContext(Dispatchers.IO) {
-                    Geocoder(requireContext()).getFromLocationName(locationName, 1).getOrNull(0)
+                    try {
+                        Geocoder(requireContext()).getFromLocationName(locationName, 1)
+                            ?.getOrNull(0)
+                    } catch (e: IOException) {
+                        null
+                    }
                 }
                 address?.let {
                     val latLng = LatLng(it.latitude, it.longitude)
@@ -926,7 +1013,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                 }
             }
         }
-        if (context?.checkAnyLocationPermission() ?: false) {
+        if (context.checkAnyLocationPermission()) {
             enableLocation(!positionSet, false)
             positionSet = true
         }
@@ -943,7 +1030,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
         if (vm.searchResult.value != null) {
             // show search result (after configuration change)
-            vm.searchResult.postValue(vm.searchResult.value)
+            displaySearchResult(vm.searchResult.value, moveCamera = !positionSet)
         }
     }
 
@@ -954,16 +1041,14 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         map.uiSettings.setMyLocationButtonEnabled(false)
         if (moveTo) {
             vm.myLocationEnabled.value = true
-            if (locationClient.isConnected) {
-                moveToLastLocation(map, animate)
-                requestLocationUpdates()
-            }
+            moveToLastLocation(map, animate)
+            requestLocationUpdates()
         }
     }
 
     @RequiresPermission(anyOf = [ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION])
     private fun moveToLastLocation(map: AnyMap, animate: Boolean) {
-        val location = LocationServices.FusedLocationApi.getLastLocation(locationClient)
+        val location = locationEngine.getLastKnownLocation()
         if (location != null) {
             val latLng = LatLng(location.latitude, location.longitude)
             vm.location.value = latLng
@@ -988,15 +1073,18 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
         // update icons of existing markers (connector filter may have changed)
         for ((marker, charger) in markers) {
+            val highlight = charger.id == vm.chargerSparse.value?.id
             marker.setIcon(
                 chargerIconGenerator.getBitmapDescriptor(
                     getMarkerTint(charger, vm.filteredConnectors.value),
-                    highlight = charger == vm.chargerSparse.value,
+                    highlight = highlight,
                     fault = charger.faultReport != null,
                     multi = charger.isMulti(vm.filteredConnectors.value),
-                    fav = charger.id in vm.favorites.value?.map { it.id } ?: emptyList()
+                    fav = charger.id in vm.favorites.value?.map { it.charger.id } ?: emptyList(),
+                    mini = vm.useMiniMarkers.value == true
                 )
             )
+            marker.setAnchor(0.5f, if (vm.useMiniMarkers.value == true) 0.5f else 1f)
         }
 
         if (chargers.toSet() != markers.values) {
@@ -1009,11 +1097,15 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                     // animate marker if it is visible, otherwise remove immediately
                     if (bounds.contains(marker.position)) {
                         val tint = getMarkerTint(charger, vm.filteredConnectors.value)
-                        val highlight = charger == vm.chargerSparse.value
+                        val highlight = charger.id == vm.chargerSparse.value?.id
                         val fault = charger.faultReport != null
                         val multi = charger.isMulti(vm.filteredConnectors.value)
-                        val fav = charger.id in vm.favorites.value?.map { it.id } ?: emptyList()
-                        animator.animateMarkerDisappear(marker, tint, highlight, fault, multi, fav)
+                        val fav =
+                            charger.id in vm.favorites.value?.map { it.charger.id } ?: emptyList()
+                        animator.animateMarkerDisappear(
+                            marker, tint, highlight, fault, multi, fav,
+                            vm.useMiniMarkers.value == true
+                        )
                     } else {
                         animator.deleteMarker(marker)
                     }
@@ -1025,13 +1117,14 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
             for (charger in chargers) {
                 if (!map1.contains(charger.id)) {
                     val tint = getMarkerTint(charger, vm.filteredConnectors.value)
-                    val highlight = charger == vm.chargerSparse.value
+                    val highlight = charger.id == vm.chargerSparse.value?.id
                     val fault = charger.faultReport != null
                     val multi = charger.isMulti(vm.filteredConnectors.value)
-                    val fav = charger.id in vm.favorites.value?.map { it.id } ?: emptyList()
+                    val fav = charger.id in vm.favorites.value?.map { it.charger.id } ?: emptyList()
                     val marker = map.addMarker(
                         MarkerOptions()
                             .position(LatLng(charger.coordinates.lat, charger.coordinates.lng))
+                            .z(chargerZ)
                             .icon(
                                 chargerIconGenerator.getBitmapDescriptor(
                                     tint,
@@ -1040,12 +1133,16 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                                     highlight,
                                     fault,
                                     multi,
-                                    fav
+                                    fav,
+                                    vm.useMiniMarkers.value == true
                                 )
                             )
-                            .anchor(0.5f, 1f)
+                            .anchor(0.5f, if (vm.useMiniMarkers.value == true) 0.5f else 1f)
                     )
-                    animator.animateMarkerAppear(marker, tint, highlight, fault, multi, fav)
+                    animator.animateMarkerAppear(
+                        marker, tint, highlight, fault, multi, fav,
+                        vm.useMiniMarkers.value == true
+                    )
                     markers[marker] = charger
                 }
             }
@@ -1055,6 +1152,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
             map.addMarker(
                 MarkerOptions()
                     .position(LatLng(cluster.coordinates.lat, cluster.coordinates.lng))
+                    .z(clusterZ)
                     .icon(
                         map.bitmapDescriptorFactory.fromBitmap(
                             clusterIconGenerator.makeIcon(
@@ -1067,23 +1165,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         }
     }
 
-    @SuppressLint("MissingPermission")
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        when (requestCode) {
-            REQUEST_LOCATION_PERMISSION -> {
-                if ((grantResults.isNotEmpty() && grantResults.any { it == PackageManager.PERMISSION_GRANTED })) {
-                    enableLocation(moveTo = true, animate = true)
-                }
-            }
-            else -> super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        }
-    }
-
-    override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
+    override fun onCreateMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.map, menu)
 
         val filterItem = menu.findItem(R.id.menu_filter)
@@ -1110,6 +1192,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
             popup.setOnMenuItemClickListener {
                 when (it.itemId) {
                     R.id.menu_edit_filters -> {
+                        exitTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
+                        reenterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
                         lifecycleScope.launch {
                             vm.copyFiltersToCustom()
                             requireView().findNavController().navigate(
@@ -1119,6 +1203,8 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                         true
                     }
                     R.id.menu_manage_filter_profiles -> {
+                        exitTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
+                        reenterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
                         requireView().findNavController().navigate(
                             R.id.action_map_to_filterProfilesFragment
                         )
@@ -1194,6 +1280,7 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
                     }
                 })
             })
+            popup.setTouchModal(false)
             popup.show()
         }
 
@@ -1217,42 +1304,35 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
         }
     }
 
+
+    override fun onMenuItemSelected(menuItem: MenuItem): Boolean {
+        return false
+    }
+
     override fun getRootView(): View {
         return binding.root
     }
 
-    override fun onConnected() {
-        val map = this.map ?: return
-        val context = this.context ?: return
-        if (vm.myLocationEnabled.value == true) {
-            if (context.checkAnyLocationPermission()) {
-                moveToLastLocation(map, false)
-                requestLocationUpdates()
-            }
-        }
-    }
-
-    @RequiresPermission(ACCESS_FINE_LOCATION)
+    @RequiresPermission(anyOf = [ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION])
     private fun requestLocationUpdates() {
-        val request: LocationRequest = LocationRequest.create()
-            .setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY)
-            .setInterval(5000)
-        LocationServices.FusedLocationApi.requestLocationUpdates(locationClient, request, this)
+        locationEngine.requestLocationUpdates(
+            Priority.HIGH_ACCURACY,
+            5000,
+            locationListener
+        )
         requestingLocationUpdates = true
     }
 
+    @SuppressLint("MissingPermission")
     private fun removeLocationUpdates() {
-        if (locationClient.isConnected) {
-            LocationServices.FusedLocationApi.removeLocationUpdates(locationClient, this)
+        if (context?.checkAnyLocationPermission() == true) {
+            locationEngine.removeUpdates(locationListener)
         }
     }
 
-    override fun onConnectionSuspended() {
-    }
-
-    override fun onLocationChanged(location: Location?) {
-        val map = this.map ?: return
-        if (location == null || vm.myLocationEnabled.value == false) return
+    private val locationListener = LocationListenerCompat { location ->
+        val map = this.map ?: return@LocationListenerCompat
+        if (vm.myLocationEnabled.value == false) return@LocationListenerCompat
 
         val latLng = LatLng(location.latitude, location.longitude)
         val oldLoc = vm.location.value
@@ -1277,8 +1357,5 @@ class MapFragment : Fragment(), OnMapReadyCallback, MapsActivity.FragmentCallbac
 
     override fun onDestroy() {
         super.onDestroy()
-        if (locationClient.isConnected) {
-            locationClient.disconnect()
-        }
     }
 }

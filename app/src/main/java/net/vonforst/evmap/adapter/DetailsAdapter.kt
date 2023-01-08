@@ -10,6 +10,8 @@ import net.vonforst.evmap.model.ChargeCardId
 import net.vonforst.evmap.model.ChargeLocation
 import net.vonforst.evmap.model.OpeningHoursDays
 import net.vonforst.evmap.plus
+import net.vonforst.evmap.utils.formatDMS
+import net.vonforst.evmap.utils.formatDecimal
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -44,13 +46,13 @@ fun buildDetails(
     if (loc == null) return emptyList()
 
     return listOfNotNull(
-        DetailsAdapter.Detail(
+        if (loc.address != null) DetailsAdapter.Detail(
             R.drawable.ic_address,
             R.string.address,
             loc.address.toString(),
             loc.locationDescription,
             clickable = true
-        ),
+        ) else null,
         if (loc.operator != null) DetailsAdapter.Detail(
             R.drawable.ic_operator,
             R.string.operator,
@@ -91,7 +93,7 @@ fun buildDetails(
             R.drawable.ic_cost,
             R.string.cost,
             loc.cost.getStatusText(ctx),
-            loc.cost.descriptionLong ?: loc.cost.descriptionShort
+            loc.cost.getDetailText()
         )
         else null,
         if (loc.chargecards != null && loc.chargecards.isNotEmpty() || loc.barrierFree == true)

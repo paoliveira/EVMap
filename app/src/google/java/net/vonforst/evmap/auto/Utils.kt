@@ -1,15 +1,23 @@
 package net.vonforst.evmap.auto
 
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import androidx.browser.customtabs.CustomTabColorSchemeParams
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.car.app.CarContext
+import androidx.car.app.CarToast
+import androidx.car.app.Screen
 import androidx.car.app.constraints.ConstraintManager
 import androidx.car.app.hardware.common.CarUnit
-import androidx.car.app.model.CarColor
-import androidx.car.app.model.CarIcon
-import androidx.car.app.model.Distance
+import androidx.car.app.model.*
 import androidx.car.app.versioning.CarAppApiLevels
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
+import net.vonforst.evmap.BuildConfig
+import net.vonforst.evmap.R
 import net.vonforst.evmap.api.availability.ChargepointStatus
 import java.util.*
 import kotlin.math.roundToInt
@@ -33,7 +41,32 @@ fun carAvailabilityColor(status: List<ChargepointStatus>): CarColor {
 val CarContext.constraintManager
     get() = getCarService(CarContext.CONSTRAINT_SERVICE) as ConstraintManager
 
+fun CarContext.getContentLimit(id: Int) = if (carAppApiLevel >= 2) {
+    constraintManager.getContentLimit(id)
+} else {
+    when (id) {
+        ConstraintManager.CONTENT_LIMIT_TYPE_GRID -> 6
+        ConstraintManager.CONTENT_LIMIT_TYPE_LIST -> 6
+        ConstraintManager.CONTENT_LIMIT_TYPE_PANE -> 4
+        ConstraintManager.CONTENT_LIMIT_TYPE_PLACE_LIST -> 6
+        ConstraintManager.CONTENT_LIMIT_TYPE_ROUTE_LIST -> 3
+        else -> throw IllegalArgumentException("unknown limit ID")
+    }
+}
+
+val CarContext.isAppDrivenRefreshSupported
+    @androidx.car.app.annotations.ExperimentalCarApi
+    get() = if (carAppApiLevel >= 6) constraintManager.isAppDrivenRefreshEnabled else false
+
 fun Bitmap.asCarIcon(): CarIcon = CarIcon.Builder(IconCompat.createWithBitmap(this)).build()
+
+val emptyCarIcon: CarIcon by lazy {
+    Bitmap.createBitmap(
+        1,
+        1,
+        Bitmap.Config.ARGB_8888
+    ).asCarIcon()
+}
 
 private const val kmPerMile = 1.609344
 private const val ftPerMile = 5280
@@ -128,6 +161,40 @@ private fun roundToMultipleOf(num: Double, step: Double): Double {
     return (num / step).roundToInt() * step
 }
 
+/**
+ * Paginates data based on specific limits for each page.
+ * If the data fits on a single page, this page can have a maximum size nSingle. Otherwise, the
+ * first page has maximum nFirst items, the last page nLast items, and all intermediate pages nOther
+ * items.
+ */
+fun <T> List<T>.paginate(nSingle: Int, nFirst: Int, nOther: Int, nLast: Int): List<List<T>> {
+    if (nOther > nLast) {
+        throw IllegalArgumentException("nLast has to be larger than or equal to nOther")
+    }
+    return if (size <= nSingle) {
+        listOf(this)
+    } else {
+        val result = mutableListOf<List<T>>()
+        var i = 0
+        var page = 0
+        while (true) {
+            val remaining = size - i
+            if (page == 0) {
+                result.add(subList(i, i + nFirst))
+                i += nFirst
+            } else if (remaining <= nLast) {
+                result.add(subList(i, size))
+                break
+            } else {
+                result.add(subList(i, i + nOther))
+                i += nOther
+            }
+            page++
+        }
+        result
+    }
+}
+
 fun getAndroidAutoVersion(ctx: Context): List<String> {
     val info = ctx.packageManager.getPackageInfo("com.google.android.projection.gearhead", 0)
     return info.versionName.split(".")
@@ -146,4 +213,51 @@ fun supportsCarApiLevel3(ctx: CarContext): Boolean {
         }
     }
     return true
+}
+
+fun openUrl(carContext: CarContext, url: String) {
+    val intent = CustomTabsIntent.Builder()
+        .setDefaultColorSchemeParams(
+            CustomTabColorSchemeParams.Builder()
+                .setToolbarColor(
+                    ContextCompat.getColor(
+                        carContext,
+                        R.color.colorPrimary
+                    )
+                )
+                .build()
+        )
+        .build().intent
+    intent.data = Uri.parse(url)
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        carContext.startActivity(intent)
+        if (BuildConfig.FLAVOR_automotive != "automotive") {
+            // only show the toast "opened on phone" if we're running on a phone
+            CarToast.makeText(
+                carContext,
+                R.string.opened_on_phone,
+                CarToast.LENGTH_LONG
+            ).show()
+        }
+    } catch (e: ActivityNotFoundException) {
+        CarToast.makeText(
+            carContext,
+            R.string.no_browser_app_found,
+            CarToast.LENGTH_LONG
+        ).show()
+    }
+}
+
+class DummyReturnScreen(ctx: CarContext) : Screen(ctx) {
+    /*
+    Dummy screen to get around template refresh limitations.
+    It immediately pops back to the previous screen.
+     */
+    override fun onGetTemplate(): Template {
+        screenManager.pop()
+        return MessageTemplate.Builder(carContext.getString(R.string.loading)).setLoading(true)
+            .build()
+    }
+
 }

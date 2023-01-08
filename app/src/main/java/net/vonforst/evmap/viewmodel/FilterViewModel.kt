@@ -8,27 +8,23 @@ import net.vonforst.evmap.api.createApi
 import net.vonforst.evmap.api.stringProvider
 import net.vonforst.evmap.model.*
 import net.vonforst.evmap.storage.AppDatabase
+import net.vonforst.evmap.storage.ChargeLocationsRepository
 import net.vonforst.evmap.storage.FilterProfile
 import net.vonforst.evmap.storage.PreferenceDataSource
 
 
 class FilterViewModel(application: Application) : AndroidViewModel(application) {
-    private var db = AppDatabase.getInstance(application)
-    private var prefs = PreferenceDataSource(application)
-    private var api: ChargepointApi<ReferenceData> = createApi(prefs.dataSource, application)
+    private val db = AppDatabase.getInstance(application)
+    private val prefs = PreferenceDataSource(application)
+    private val api: ChargepointApi<ReferenceData> = createApi(prefs.dataSource, application)
+    private val repo = ChargeLocationsRepository(api, viewModelScope, db, prefs)
+    private val filters = repo.getFilters(application.stringProvider())
 
-    private val referenceData = api.getReferenceData(viewModelScope, application)
-    private val filters = MediatorLiveData<List<Filter<FilterValue>>>().apply {
-        addSource(referenceData) { data ->
-            value = api.getFilters(data, application.stringProvider())
-        }
-    }
-
-    private val filterValues: LiveData<List<FilterValue>> by lazy {
+    private val filterValues: LiveData<List<FilterValue>?> by lazy {
         db.filterValueDao().getFilterValues(FILTERS_CUSTOM, prefs.dataSource)
     }
 
-    val filtersWithValue: LiveData<FilterValues> by lazy {
+    val filtersWithValue: LiveData<FilterValues?> by lazy {
         filtersWithValue(filters, filterValues)
     }
 
@@ -65,9 +61,10 @@ class FilterViewModel(application: Application) : AndroidViewModel(application) 
         prefs.filterStatus = FILTERS_CUSTOM
     }
 
-    suspend fun saveAsProfile(name: String) {
+    suspend fun saveAsProfile(name: String): Boolean {
         // get or create profile
         var profileId = db.filterProfileDao().getProfileByName(name, prefs.dataSource)?.id
+
         if (profileId == null) {
             profileId = db.filterProfileDao().getNewId(prefs.dataSource)
             db.filterProfileDao().insert(FilterProfile(name, prefs.dataSource, profileId))
@@ -85,5 +82,14 @@ class FilterViewModel(application: Application) : AndroidViewModel(application) 
 
         // set selected profile
         prefs.filterStatus = profileId
+
+        return true
+    }
+
+    suspend fun deleteCurrentProfile() {
+        filterProfile.value?.let {
+            db.filterProfileDao().delete(it)
+            prefs.filterStatus = FILTERS_DISABLED
+        }
     }
 }

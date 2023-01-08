@@ -20,6 +20,7 @@ import net.vonforst.evmap.model.*
 @Database(
     entities = [
         ChargeLocation::class,
+        Favorite::class,
         BooleanFilterValue::class,
         MultipleChoiceFilterValue::class,
         SliderFilterValue::class,
@@ -31,11 +32,12 @@ import net.vonforst.evmap.model.*
         OCMConnectionType::class,
         OCMCountry::class,
         OCMOperator::class
-    ], version = 14
+    ], version = 18
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chargeLocationsDao(): ChargeLocationsDao
+    abstract fun favoritesDao(): FavoritesDao
     abstract fun filterValueDao(): FilterValueDao
     abstract fun filterProfileDao(): FilterProfileDao
     abstract fun recentAutocompletePlaceDao(): RecentAutocompletePlaceDao
@@ -53,7 +55,8 @@ abstract class AppDatabase : RoomDatabase() {
                 .addMigrations(
                     MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6,
                     MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11,
-                    MIGRATION_12, MIGRATION_13, MIGRATION_14
+                    MIGRATION_12, MIGRATION_13, MIGRATION_14, MIGRATION_15, MIGRATION_16,
+                    MIGRATION_17, MIGRATION_18
                 )
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
@@ -309,6 +312,67 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_14 = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS `RecentAutocompletePlace` (`id` TEXT NOT NULL, `dataSource` TEXT NOT NULL, `timestamp` INTEGER NOT NULL, `primaryText` TEXT NOT NULL, `secondaryText` TEXT NOT NULL, `latLng` TEXT NOT NULL, `viewport` TEXT, `types` TEXT NOT NULL, PRIMARY KEY(`id`, `dataSource`))");
+            }
+
+        }
+
+        private val MIGRATION_15 = object : Migration(14, 15) {
+            @SuppressLint("Range")
+            override fun migrate(db: SupportSQLiteDatabase) {
+                try {
+                    db.beginTransaction()
+                    db.execSQL("CREATE TABLE IF NOT EXISTS `Favorite` (`favoriteId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `chargerId` INTEGER NOT NULL, `chargerDataSource` TEXT NOT NULL, FOREIGN KEY(`chargerId`, `chargerDataSource`) REFERENCES `ChargeLocation`(`id`, `dataSource`) ON UPDATE NO ACTION ON DELETE RESTRICT )");
+
+                    val cursor = db.query("SELECT * FROM `ChargeLocation`")
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(cursor.getColumnIndex("id"))
+                        val dataSource = cursor.getString(cursor.getColumnIndex("dataSource"))
+                        val values = ContentValues().apply {
+                            put("chargerId", id)
+                            put("chargerDataSource", dataSource)
+                        }
+                        db.insert("favorite", SQLiteDatabase.CONFLICT_ROLLBACK, values)
+                    }
+
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+        }
+
+        private val MIGRATION_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `ChargeLocation` ADD `timeRetrieved` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `ChargeLocation` ADD `isDetailed` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_Favorite_chargerId_chargerDataSource` ON `Favorite` (`chargerId`, `chargerDataSource`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_BooleanFilterValue_profile_dataSource` ON `BooleanFilterValue` (`profile`, `dataSource`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_MultipleChoiceFilterValue_profile_dataSource` ON `MultipleChoiceFilterValue` (`profile`, `dataSource`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_SliderFilterValue_profile_dataSource` ON `SliderFilterValue` (`profile`, `dataSource`)")
+            }
+        }
+
+        private val MIGRATION_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                try {
+                    db.beginTransaction()
+                    db.execSQL("CREATE TABLE IF NOT EXISTS `FavoriteNew` (`favoriteId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `chargerId` INTEGER NOT NULL, `chargerDataSource` TEXT NOT NULL, FOREIGN KEY(`chargerId`, `chargerDataSource`) REFERENCES `ChargeLocation`(`id`, `dataSource`) ON UPDATE NO ACTION ON DELETE NO ACTION )");
+                    val columnList =
+                        "`favoriteId`,`chargerId`,`chargerDataSource`"
+                    db.execSQL("INSERT INTO `FavoriteNew`($columnList) SELECT $columnList FROM `Favorite`")
+                    db.execSQL("DROP TABLE `Favorite`")
+                    db.execSQL("ALTER TABLE `FavoriteNew` RENAME TO `Favorite`")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS `index_Favorite_chargerId_chargerDataSource` ON `Favorite` (`chargerId`, `chargerDataSource`)")
+
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
             }
 
         }

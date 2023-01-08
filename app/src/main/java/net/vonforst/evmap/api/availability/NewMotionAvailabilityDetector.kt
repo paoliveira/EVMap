@@ -11,8 +11,8 @@ import retrofit2.http.GET
 import retrofit2.http.Path
 import java.util.*
 
-private const val coordRange = 0.1  // range of latitude and longitude for loading the map
-private const val maxDistance = 15  // max distance between reported positions in meters
+private const val coordRange = 0.005  // range of latitude and longitude for loading the map
+private const val maxDistance = 40  // max distance between reported positions in meters
 
 interface NewMotionApi {
     @GET("markers/{lngMin}/{lngMax}/{latMin}/{latMax}")
@@ -130,13 +130,14 @@ class NewMotionAvailabilityDetector(client: OkHttpClient, baseUrl: String? = nul
         }
         val connectorStatus = details.flatMap { it.evses }.flatMap { evse ->
             evse.connectors.map { connector ->
-                connector to evse.status
+                Triple(connector, evse.status, evse.evseId)
             }
         }
 
         val nmConnectors = mutableMapOf<Long, Pair<Double, String>>()
         val nmStatus = mutableMapOf<Long, ChargepointStatus>()
-        connectorStatus.forEach { (connector, statusStr) ->
+        val nmEvseId = mutableMapOf<Long, String>()
+        connectorStatus.forEach { (connector, statusStr, evseId) ->
             val id = connector.uid
             val power = connector.electricalProperties.getPower()
             val type = when (connector.connectorType.toLowerCase(Locale.ROOT)) {
@@ -161,16 +162,26 @@ class NewMotionAvailabilityDetector(client: OkHttpClient, baseUrl: String? = nul
             }
             nmConnectors.put(id, power to type)
             nmStatus.put(id, status)
+            evseId?.let { nmEvseId[id] = it }
         }
 
         val match = matchChargepoints(nmConnectors, location.chargepointsMerged)
         val chargepointStatus = match.mapValues { entry ->
             entry.value.map { nmStatus[it]!! }
         }
+        val evseIds = if (nmEvseId.size == nmStatus.size) match.mapValues { entry ->
+            entry.value.map { nmEvseId[it]!! }
+        } else null
         return ChargeLocationStatus(
             chargepointStatus,
-            "NewMotion"
+            "NewMotion",
+            evseIds
         )
+    }
+
+    override fun isChargerSupported(charger: ChargeLocation): Boolean {
+        // NewMotion is our fallback
+        return true
     }
 
 }

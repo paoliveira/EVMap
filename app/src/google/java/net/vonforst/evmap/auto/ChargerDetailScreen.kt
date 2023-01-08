@@ -1,10 +1,10 @@
 package net.vonforst.evmap.auto
 
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
+import android.text.SpannableString
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import androidx.car.app.CarContext
@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import coil.imageLoader
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.vonforst.evmap.*
@@ -26,20 +27,26 @@ import net.vonforst.evmap.api.availability.ChargeLocationStatus
 import net.vonforst.evmap.api.availability.getAvailability
 import net.vonforst.evmap.api.chargeprice.ChargepriceApi
 import net.vonforst.evmap.api.createApi
+import net.vonforst.evmap.api.iconForPlugType
 import net.vonforst.evmap.api.nameForPlugType
 import net.vonforst.evmap.api.stringProvider
 import net.vonforst.evmap.model.ChargeLocation
+import net.vonforst.evmap.model.Cost
+import net.vonforst.evmap.model.FaultReport
+import net.vonforst.evmap.model.Favorite
 import net.vonforst.evmap.storage.AppDatabase
+import net.vonforst.evmap.storage.ChargeLocationsRepository
 import net.vonforst.evmap.storage.PreferenceDataSource
 import net.vonforst.evmap.ui.ChargerIconGenerator
 import net.vonforst.evmap.ui.availabilityText
 import net.vonforst.evmap.ui.getMarkerTint
 import net.vonforst.evmap.viewmodel.Status
-import net.vonforst.evmap.viewmodel.getReferenceData
+import net.vonforst.evmap.viewmodel.awaitFinished
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import kotlin.math.roundToInt
+
 
 class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : Screen(ctx) {
     var charger: ChargeLocation? = null
@@ -48,28 +55,24 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
 
     val prefs = PreferenceDataSource(ctx)
     private val db = AppDatabase.getInstance(carContext)
-    private val api by lazy {
-        createApi(prefs.dataSource, ctx)
-    }
-    private val referenceData = api.getReferenceData(lifecycleScope, carContext)
+    private val repo =
+        ChargeLocationsRepository(createApi(prefs.dataSource, ctx), lifecycleScope, db, prefs)
 
     private val imageSize = 128  // images should be 128dp according to docs
-    private val imageHeightLarge = 480  // images should be 480 x 854 dp according to docs
-    private val imageWidthLarge = 854
+    private val imageSizeLarge = 480  // images should be 480 x 480 dp according to docs
 
     private val iconGen =
-        ChargerIconGenerator(carContext, null, oversize = 1.4f, height = imageSize)
+        ChargerIconGenerator(carContext, null, height = imageSize)
 
-    private val maxRows = if (ctx.carAppApiLevel >= 2) {
-        ctx.constraintManager.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_PANE)
-    } else 2
+    private val maxRows = ctx.getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_PANE)
     private val largeImageSupported =
         ctx.carAppApiLevel >= 4  // since API 4, Row.setImage is supported
 
+    private var favorite: Favorite? = null
+    private var favoriteUpdateJob: Job? = null
+
     init {
-        referenceData.observe(this) {
-            loadCharger()
-        }
+        loadCharger()
     }
 
     override fun onGetTemplate(): Template {
@@ -78,8 +81,10 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
         return PaneTemplate.Builder(
             Pane.Builder().apply {
                 charger?.let { charger ->
-                    if (largeImageSupported && photo != null) {
-                        setImage(CarIcon.Builder(IconCompat.createWithBitmap(photo)).build())
+                    if (largeImageSupported) {
+                        photo?.let {
+                            setImage(CarIcon.Builder(IconCompat.createWithBitmap(it)).build())
+                        }
                     }
                     generateRows(charger).forEach { addRow(it) }
                     addAction(
@@ -93,59 +98,114 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
                                 ).build()
                             )
                             .setTitle(carContext.getString(R.string.navigate))
+                            .setFlags(Action.FLAG_PRIMARY)
                         .setBackgroundColor(CarColor.PRIMARY)
                         .setOnClickListener {
                             navigateToCharger(charger)
                         }
                         .build())
-                    charger.chargepriceData?.country?.let { country ->
-                        if (ChargepriceApi.isCountrySupported(country, charger.dataSource)) {
-                            addAction(Action.Builder()
-                                .setIcon(
-                                    CarIcon.Builder(
-                                        IconCompat.createWithResource(
-                                            carContext,
-                                            R.drawable.ic_chargeprice
-                                        )
-                                    ).build()
-                                )
-                                .setTitle(carContext.getString(R.string.auto_prices))
+                        if (ChargepriceApi.isChargerSupported(charger)) {
+                            addAction(
+                                Action.Builder()
+                                    .setIcon(
+                                        CarIcon.Builder(
+                                            IconCompat.createWithResource(
+                                                carContext,
+                                                R.drawable.ic_chargeprice
+                                            )
+                                        ).build()
+                                    )
+                                    .setTitle(carContext.getString(R.string.auto_prices))
                                 .setOnClickListener {
                                     screenManager.push(ChargepriceScreen(carContext, charger))
                                 }
                                 .build())
                         }
-                    }
                 } ?: setLoading(true)
             }.build()
         ).apply {
             setTitle(chargerSparse.name)
             setHeaderAction(Action.BACK)
-            setActionStrip(
-                ActionStrip.Builder().addAction(
-                    Action.Builder()
-                        .setTitle(carContext.getString(R.string.open_in_app))
-                        .setOnClickListener(ParkedOnlyOnClickListener.create {
-                            val intent = Intent(carContext, MapsActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                .putExtra(EXTRA_CHARGER_ID, chargerSparse.id)
-                                .putExtra(EXTRA_LAT, chargerSparse.coordinates.lat)
-                                .putExtra(EXTRA_LON, chargerSparse.coordinates.lng)
-                            carContext.startActivity(intent)
-                            CarToast.makeText(
-                                carContext,
-                                R.string.opened_on_phone,
-                                CarToast.LENGTH_LONG
-                            ).show()
-                        })
-                        .build()
-                ).build()
-            )
+            charger?.let { charger ->
+                setActionStrip(
+                    ActionStrip.Builder().apply {
+                        if (BuildConfig.FLAVOR_automotive != "automotive") {
+                            // show "Open in app" action if not running on Android Automotive
+                            addAction(
+                                Action.Builder()
+                                    .setTitle(carContext.getString(R.string.open_in_app))
+                                    .setOnClickListener(ParkedOnlyOnClickListener.create {
+                                        val intent = Intent(carContext, MapsActivity::class.java)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            .putExtra(EXTRA_CHARGER_ID, chargerSparse.id)
+                                            .putExtra(EXTRA_LAT, chargerSparse.coordinates.lat)
+                                            .putExtra(EXTRA_LON, chargerSparse.coordinates.lng)
+                                        carContext.startActivity(intent)
+                                        CarToast.makeText(
+                                            carContext,
+                                            R.string.opened_on_phone,
+                                            CarToast.LENGTH_LONG
+                                        ).show()
+                                    })
+                                    .build()
+                            )
+                        }
+                        // show fav action
+                        addAction(Action.Builder()
+                            .setOnClickListener {
+                                favorite?.let {
+                                    deleteFavorite(it)
+                                } ?: run {
+                                    insertFavorite(charger)
+                                }
+                            }
+                            .setIcon(
+                                CarIcon.Builder(
+                                    IconCompat.createWithResource(
+                                        carContext,
+                                        if (favorite != null) {
+                                            R.drawable.ic_fav
+                                        } else {
+                                            R.drawable.ic_fav_no
+                                        }
+                                    )
+                                )
+                                    .setTint(CarColor.DEFAULT).build()
+                            )
+                            .build())
+                            .build()
+                    }.build()
+                )
+            }
         }.build()
+    }
+
+    private fun insertFavorite(charger: ChargeLocation) {
+        if (favoriteUpdateJob?.isCompleted == false) return
+        favoriteUpdateJob = lifecycleScope.launch {
+            db.chargeLocationsDao().insert(charger)
+            val fav = Favorite(
+                chargerId = charger.id,
+                chargerDataSource = charger.dataSource
+            )
+            val id = db.favoritesDao().insert(fav)[0]
+            favorite = fav.copy(favoriteId = id)
+            invalidate()
+        }
+    }
+
+    private fun deleteFavorite(fav: Favorite) {
+        if (favoriteUpdateJob?.isCompleted == false) return
+        favoriteUpdateJob = lifecycleScope.launch {
+            db.favoritesDao().delete(fav)
+            favorite = null
+            invalidate()
+        }
     }
 
     private fun generateRows(charger: ChargeLocation): List<Row> {
         val rows = mutableListOf<Row>()
+        val photo = photo
 
         // Row 1: address + chargepoints
         rows.add(Row.Builder().apply {
@@ -183,15 +243,9 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
                 val operatorText = generateOperatorText(charger)
                 setTitle(operatorText)
 
-                charger.cost?.let { addText(it.getStatusText(carContext, emoji = true)) }
+                charger.cost?.let { addText(generateCostStatusText(it)) }
                 charger.faultReport?.let { fault ->
-                    addText(
-                        carContext.getString(
-                            R.string.auto_fault_report_date,
-                            fault.created?.atZone(ZoneId.systemDefault())
-                                ?.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT))
-                        )
-                    )
+                    addText(generateFaultReportTitle(fault))
                 }
             }.build())
         } else {
@@ -206,20 +260,14 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
                 val operatorText = generateOperatorText(charger)
                 setTitle(operatorText)
                 charger.cost?.let {
-                    addText(it.getStatusText(carContext, emoji = true))
-                    (it.descriptionShort ?: it.descriptionLong)?.let { addText(it) }
+                    addText(generateCostStatusText(it))
+                    it.getDetailText()?.let { addText(it) }
                 }
             }.build())
             // row 3: fault report (if exists)
             charger.faultReport?.let { fault ->
                 rows.add(Row.Builder().apply {
-                    setTitle(
-                        carContext.getString(
-                            R.string.auto_fault_report_date,
-                            fault.created?.atZone(ZoneId.systemDefault())
-                                ?.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT))
-                        )
-                    )
+                    setTitle(generateFaultReportTitle(fault))
                     fault.description?.let {
                         addText(
                             HtmlCompat.fromHtml(
@@ -232,8 +280,10 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
             }
             // row 4: opening hours + location description
             charger.openinghours?.let { hours ->
+                val title =
+                    hours.getStatusText(carContext).ifEmpty { carContext.getString(R.string.hours) }
                 rows.add(Row.Builder().apply {
-                    setTitle(hours.getStatusText(carContext))
+                    setTitle(title)
                     hours.description?.let { addText(it) }
                     charger.locationDescription?.let { addText(it) }
                 }.build())
@@ -242,18 +292,87 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
         return rows
     }
 
+    private fun generateCostStatusText(cost: Cost): CharSequence {
+        val string = SpannableString(cost.getStatusText(carContext, emoji = true))
+        // replace emoji with CarIcon
+        string.indexOf('⚡').takeIf { it >= 0 }?.let { index ->
+            string.setSpan(
+                CarIconSpan.create(
+                    CarIcon.Builder(
+                        IconCompat.createWithResource(
+                            carContext,
+                            R.drawable.ic_lightning
+                        )
+                    ).setTint(CarColor.YELLOW).build()
+                ), index, index + 1, SpannableString.SPAN_INCLUSIVE_EXCLUSIVE
+            )
+        }
+        string.indexOf('\uD83C').takeIf { it >= 0 }?.let { index ->
+            string.setSpan(
+                CarIconSpan.create(
+                    CarIcon.Builder(
+                        IconCompat.createWithResource(
+                            carContext,
+                            R.drawable.ic_parking
+                        )
+                    ).setTint(CarColor.BLUE).build()
+                ), index, index + 2, SpannableString.SPAN_INCLUSIVE_EXCLUSIVE
+            )
+        }
+        return string
+    }
+
+
+    private fun generateFaultReportTitle(fault: FaultReport): CharSequence {
+        val string = SpannableString(
+            carContext.getString(
+                R.string.auto_fault_report_date,
+                fault.created?.atZone(ZoneId.systemDefault())
+                    ?.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT))
+            )
+        )
+        // replace emoji with CarIcon
+        string.setSpan(
+            CarIconSpan.create(
+                CarIcon.Builder(
+                    IconCompat.createWithResource(
+                        carContext,
+                        R.drawable.ic_fault_report
+                    )
+                ).setTint(CarColor.YELLOW).build()
+            ), 0, 1, SpannableString.SPAN_INCLUSIVE_EXCLUSIVE
+        )
+        return string
+    }
+
     private fun generateChargepointsText(charger: ChargeLocation): SpannableStringBuilder {
         val chargepointsText = SpannableStringBuilder()
         charger.chargepointsMerged.forEachIndexed { i, cp ->
-            if (i > 0) chargepointsText.append(" · ")
-            chargepointsText.append(
-                "${cp.count}× ${
-                    nameForPlugType(
-                        carContext.stringProvider(),
-                        cp.type
+            chargepointsText.apply {
+                if (i > 0) append(" · ")
+                append("${cp.count}× ")
+                val plugIcon = iconForPlugType(cp.type)
+                if (plugIcon != 0) {
+                    append(
+                        nameForPlugType(carContext.stringProvider(), cp.type),
+                        CarIconSpan.create(
+                            CarIcon.Builder(
+                                IconCompat.createWithResource(
+                                    carContext,
+                                    plugIcon
+                                )
+                            ).setTint(
+                                CarColor.createCustom(Color.WHITE, Color.BLACK)
+                            ).build()
+                        ),
+                        Spanned.SPAN_INCLUSIVE_EXCLUSIVE
                     )
-                } ${cp.formatPower()}"
-            )
+                } else {
+                    append(nameForPlugType(carContext.stringProvider(), cp.type))
+                }
+                append(" ")
+                append(cp.formatPower())
+            }
             availability?.status?.get(cp)?.let { status ->
                 chargepointsText.append(
                     " (${availabilityText(status)}/${cp.count})",
@@ -293,25 +412,23 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
     }
 
     private fun loadCharger() {
-        val referenceData = referenceData.value ?: return
         lifecycleScope.launch {
-            val response = api.getChargepointDetail(referenceData, chargerSparse.id)
+            favorite = db.favoritesDao().findFavorite(chargerSparse.id, chargerSparse.dataSource)
+
+            val response = repo.getChargepointDetail(chargerSparse.id).awaitFinished()
             if (response.status == Status.SUCCESS) {
                 val charger = response.data!!
+                this@ChargerDetailScreen.charger = charger
+                invalidate()
 
                 val photo = charger.photos?.firstOrNull()
                 photo?.let {
                     val density = carContext.resources.displayMetrics.density
-                    val url = if (largeImageSupported) {
-                        photo.getUrl(
-                            width = (imageWidthLarge * density).roundToInt(),
-                            height = (imageHeightLarge * density).roundToInt()
-                        )
-                    } else {
-                        photo.getUrl(size = (imageSize * density).roundToInt())
-                    }
+                    val size =
+                        (density * if (largeImageSupported) imageSizeLarge else imageSize).roundToInt()
+                    val url = photo.getUrl(size = size)
                     val request = ImageRequest.Builder(carContext).data(url).build()
-                    var img =
+                    val img =
                         (carContext.imageLoader.execute(request).drawable as BitmapDrawable).bitmap
 
                     // draw icon on top of image
@@ -321,21 +438,32 @@ class ChargerDetailScreen(ctx: CarContext, val chargerSparse: ChargeLocation) : 
                         multi = charger.isMulti()
                     )
 
-                    img = img.copy(Bitmap.Config.ARGB_8888, true)
+                    val outImg = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
                     val iconSmall = icon.scale(
-                        (img.height * 0.4 / icon.height * icon.width).roundToInt(),
-                        (img.height * 0.4).roundToInt()
+                        (size * 0.4 / icon.height * icon.width).roundToInt(),
+                        (size * 0.4).roundToInt()
                     )
-                    val canvas = Canvas(img)
+                    val canvas = Canvas(outImg)
+
+                    val m = Matrix()
+                    m.setRectToRect(
+                        RectF(0f, 0f, img.width.toFloat(), img.height.toFloat()),
+                        RectF(0f, 0f, size.toFloat(), size.toFloat()),
+                        Matrix.ScaleToFit.CENTER
+                    )
+                    canvas.drawBitmap(
+                        img.copy(Bitmap.Config.ARGB_8888, false), m, null
+                    )
                     canvas.drawBitmap(
                         iconSmall,
                         0f,
-                        (img.height - iconSmall.height * 1.1).toFloat(),
+                        (size - iconSmall.height * 1.1).toFloat(),
                         null
                     )
-                    this@ChargerDetailScreen.photo = img
+                    this@ChargerDetailScreen.photo = outImg
                 }
-                this@ChargerDetailScreen.charger = charger
+
+                invalidate()
 
                 availability = getAvailability(charger).data
 

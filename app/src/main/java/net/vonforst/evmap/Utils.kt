@@ -6,11 +6,6 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.text.*
 import android.text.style.StyleSpan
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.Observer
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 import java.util.*
 
 fun Bundle.optDouble(name: String): Double? {
@@ -77,32 +72,13 @@ fun max(a: Int?, b: Int?): Int? {
      * otherwise the non-null value or null
      */
     return if (a != null && b != null) {
-        max(a, b)
+        kotlin.math.max(a, b)
     } else {
         a ?: b
     }
 }
 
 fun <T> List<T>.containsAny(vararg values: T) = values.any { this.contains(it) }
-
-public suspend fun <T> LiveData<T>.await(): T {
-    return withContext(Dispatchers.Main.immediate) {
-        suspendCancellableCoroutine { continuation ->
-            val observer = object : Observer<T> {
-                override fun onChanged(value: T) {
-                    removeObserver(this)
-                    continuation.resume(value, null)
-                }
-            }
-
-            observeForever(observer)
-
-            continuation.invokeOnCancellation {
-                removeObserver(observer)
-            }
-        }
-    }
-}
 
 fun Context.isDarkMode() =
     (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES

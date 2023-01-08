@@ -3,14 +3,18 @@ package net.vonforst.evmap.fragment
 import android.os.Bundle
 import android.view.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.MenuProvider
 import androidx.databinding.DataBindingUtil
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.ui.setupWithNavController
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.transition.MaterialSharedAxis
 import kotlinx.coroutines.launch
 import net.vonforst.evmap.MapsActivity
 import net.vonforst.evmap.R
@@ -20,9 +24,15 @@ import net.vonforst.evmap.ui.showEditTextDialog
 import net.vonforst.evmap.viewmodel.FilterViewModel
 
 
-class FilterFragment : Fragment() {
+class FilterFragment : Fragment(), MenuProvider {
     private lateinit var binding: FragmentFilterBinding
     private val vm: FilterViewModel by viewModels()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enterTransition = MaterialSharedAxis(MaterialSharedAxis.Z, true)
+        returnTransition = MaterialSharedAxis(MaterialSharedAxis.Z, false)
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -32,9 +42,6 @@ class FilterFragment : Fragment() {
         binding = DataBindingUtil.inflate(inflater, R.layout.fragment_filter, container, false)
         binding.lifecycleOwner = this
         binding.vm = vm
-
-        setHasOptionsMenu(true)
-
         vm.filterProfile.observe(viewLifecycleOwner) {}
 
         return binding.root
@@ -42,6 +49,18 @@ class FilterFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         (requireActivity() as AppCompatActivity).setSupportActionBar(binding.toolbar)
+        requireActivity().addMenuProvider(this, viewLifecycleOwner, Lifecycle.State.RESUMED)
+
+        binding.toolbar.setupWithNavController(
+            findNavController(),
+            (requireActivity() as MapsActivity).appBarConfiguration
+        )
+
+        vm.filterProfile.observe(viewLifecycleOwner) {
+            if (it != null) {
+                binding.toolbar.title = getString(R.string.edit_filter_profile, it.name)
+            }
+        }
 
         binding.filtersList.apply {
             adapter = FiltersAdapter()
@@ -57,14 +76,16 @@ class FilterFragment : Fragment() {
         binding.toolbar.setNavigationOnClickListener {
             findNavController().popBackStack()
         }
+
+        // Workaround for AndroidX bug: https://github.com/material-components/material-components-android/issues/1984
+        view.setBackgroundColor(MaterialColors.getColor(view, android.R.attr.windowBackground))
     }
 
-    override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
+    override fun onCreateMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.filter, menu)
-        super.onCreateOptionsMenu(menu, inflater)
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+    override fun onMenuItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             R.id.menu_apply -> {
                 lifecycleScope.launch {
@@ -77,7 +98,7 @@ class FilterFragment : Fragment() {
                 saveProfile()
                 true
             }
-            else -> super.onOptionsItemSelected(item)
+            else -> false
         }
     }
 
@@ -106,20 +127,6 @@ class FilterFragment : Fragment() {
                 .setNegativeButton(R.string.cancel) { di, button ->
 
                 }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        binding.toolbar.setupWithNavController(
-            findNavController(),
-            (requireActivity() as MapsActivity).appBarConfiguration
-        )
-
-        vm.filterProfile.observe(viewLifecycleOwner) {
-            if (it != null) {
-                binding.toolbar.title = getString(R.string.edit_filter_profile, it.name)
-            }
         }
     }
 }

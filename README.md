@@ -1,4 +1,4 @@
-EVMap [![Build Status](https://app.travis-ci.com/johan12345/EVMap.svg?branch=master)](https://app.travis-ci.com/johan12345/EVMap)
+EVMap [![Build Status](https://github.com/johan12345/EVMap/actions/workflows/tests.yml/badge.svg)](https://github.com/johan12345/EVMap/actions)
 =====
 
 <img src="https://raw.githubusercontent.com/johan12345/EVMap/master/_img/feature_graphic.svg" width=700 alt="Logo"/>
@@ -20,7 +20,7 @@ Features
 - Advanced filtering options, including saved filter profiles
 - Favorites list, also with availability information
 - Integrated price comparison using [Chargeprice.app](https://chargeprice.app) (only in Europe)
-- Android Auto integration
+- Android Auto & Android Automotive OS integration
 - No ads, fully open source
 - Compatible with Android 5.0 and above
 - Can use Google Maps or Mapbox (OpenStreetMap) as map backends - the version available on F-Droid only uses Mapbox.
@@ -41,9 +41,24 @@ EVMap uses and put them into the app in the form of a resource file called `apik
 `app/src/main/res/values`. You can find more information on which API keys are necessary for which
 features and how they can be obtained in our [documentation page](doc/api_keys.md).
 
-There are two different build flavors, `google` and `foss`, where only the `google` variant uses
-Google Maps data and provides the Android Auto integration. The `foss` variant only uses Mapbox data
-and should run on devices without Google Play Services.
+There are three different build flavors, `googleNormal`, `fossNormal` and `googleAutomotive`.
+- The `foss` variant only uses Mapbox data and should run on most Android devices, even without
+  Google Play Services.
+- The `google` variants also include access to Google Maps data.
+    - `googleNormal` is intended to run on smartphones and tablets, and also includes the Android
+      Auto app for use on the car display.
+    - `googleAutomotive` variant is intended to be installed directly on car infotainment systems
+      using the Google-flavored Android Automotive OS. It does not provide the usual smartphone UI.
 
 We also have a special [documentation page](doc/android_auto.md) on how to test the Android Auto
 app.
+
+Translations
+------------
+
+You can use our [Weblate page](https://hosted.weblate.org/projects/evmap/) to help translate EVMap
+into new languages.
+
+<a href="https://hosted.weblate.org/engage/evmap/">
+<img src="https://hosted.weblate.org/widgets/evmap/-/open-graph.png" width="500" alt="Translation status" />
+</a>
